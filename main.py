@@ -16,7 +16,7 @@ from reportlab.lib import colors
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API para diagnóstico técnico de viviendas bajo normativa chilena",
-    version="5.1.0"
+    version="5.1.1"
 )
 
 # Configuración de CORS
@@ -171,16 +171,12 @@ async def diagnostico_gratis(foto: UploadFile = File(...)):
         # 3. Construir el binario PDF con ReportLab
         pdf_bytes = generar_pdf_reportlab(datos)
 
-        # 4. Retornar la respuesta como STREAM BINARIO PDF
+        # 4. Nombre dinámico del archivo PDF
+        categoria = datos.get("categoria", "Informe")
+        filename = f"Informe_RevisaMiCasa_{categoria}.pdf"
+
+        # 5. Retornar la respuesta como STREAM BINARIO PDF
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
-            headers={
-                "Content-Type": "application/pdf",
-                "Content-Disposition": "attachment; filename=Informe_RevisaMiCasa.pdf",
-                "Access-Control-Expose-Headers": "Content-Disposition"
-            }
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al procesar la solicitud: {str(e)}")
+            headers
