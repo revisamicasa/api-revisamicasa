@@ -16,7 +16,7 @@ from reportlab.lib import colors
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API de diagnósticos técnicos bajo normativa chilena",
-    version="4.1.0"
+    version="4.2.0"
 )
 
 app.add_middleware(
@@ -139,66 +139,75 @@ def home():
     return {"status": "online", "servicio": "API Revisa Mi Casa"}
 
 
-# 1. RUTA GRATUITA: Devuelve el JSON que recibiste
 @app.post("/evaluar-gratis")
 async def evaluar_gratis(foto: UploadFile = File(...)):
     if not client:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
 
-    contents = await foto.read()
-    image = Image.open(io.BytesIO(contents))
+    try:
+        contents = await foto.read()
+        image = Image.open(io.BytesIO(contents))
 
-    res = client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=[image, PROMPT_PRELIMINAR],
-        config=types.GenerateContentConfig(response_mime_type="application/json")
-    )
-    datos = json.loads(res.text)
+        res = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[image, PROMPT_PRELIMINAR],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        datos = json.loads(res.text)
 
-    return {
-        "resultado_preliminar": datos.get("resultado_preliminar", "Evaluación preliminar completada"),
-        "tipo_falla": datos.get("tipo_falla", "Requiere revisión detallada"),
-        "mensaje": datos.get("mensaje", "Hemos detectado una posible falla en revestimiento/estructura."),
-        "opciones": {
-            "informe_detallado_pago": {
-                "precio_clp": 3990,
-                "incluye": "Lista de materiales, paso a paso de reparación y estimación de costos."
-            },
-            "agendar_inspector": {
-                "recomendado": True,
-                "mensaje": "Si prefieres no reparar tú mismo, podemos enviar un inspector técnico de Revisa Mi Casa."
+        return {
+            "resultado_preliminar": datos.get("resultado_preliminar", "Evaluación preliminar completada"),
+            "tipo_falla": datos.get("tipo_falla", "Requiere revisión detallada"),
+            "mensaje": datos.get("mensaje", "Hemos detectado una posible falla en revestimiento/estructura."),
+            "opciones": {
+                "informe_detallado_pago": {
+                    "precio_clp": 3990,
+                    "incluye": "Lista de materiales, paso a paso de reparación y estimación de costos."
+                },
+                "agendar_inspector": {
+                    "recomendado": True,
+                    "mensaje": "Si prefieres no reparar tú mismo, podemos enviar un inspector técnico de Revisa Mi Casa."
+                }
             }
         }
-    }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# 2. RUTA DE PAGO / DESCARGA: Devuelve el archivo PDF real
 @app.post(
     "/descargar-informe-pago",
     response_class=Response,
-    responses={200: {"content": {"application/pdf": {}}}}
+    responses={
+        200: {
+            "content": {"application/pdf": {}},
+            "description": "Retorna el informe técnico detallado en formato PDF."
+        }
+    }
 )
 async def descargar_informe_pago(foto: UploadFile = File(...)):
     if not client:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
 
-    contents = await foto.read()
-    image = Image.open(io.BytesIO(contents))
+    try:
+        contents = await foto.read()
+        image = Image.open(io.BytesIO(contents))
 
-    res = client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=[image, PROMPT_DETALLADO],
-        config=types.GenerateContentConfig(response_mime_type="application/json")
-    )
-    datos_detallados = json.loads(res.text)
+        res = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[image, PROMPT_DETALLADO],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        datos_detallados = json.loads(res.text)
 
-    pdf_bytes = generar_pdf_reportlab(datos_detallados)
+        pdf_bytes = generar_pdf_reportlab(datos_detallados)
 
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": "attachment; filename=Informe_Detallado_RevisaMiCasa.pdf",
-            "Access-Control-Expose-Headers": "Content-Disposition"
-        }
-    )
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": "attachment; filename=Informe_Detallado_RevisaMiCasa.pdf",
+                "Access-Control-Expose-Headers": "Content-Disposition"
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
