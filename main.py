@@ -17,9 +17,10 @@ from reportlab.lib import colors
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API para diagnóstico técnico de viviendas bajo normativa chilena",
-    version="8.0.0"
+    version="8.5.0"
 )
 
+# Configuración de CORS amplia para cPanel, localhost y el dominio revisamicasa.cl
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -53,6 +54,7 @@ Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estruc
 """
 
 def generar_pdf_reportlab(datos: dict) -> str:
+    """Genera un archivo PDF físico en la carpeta temporal /tmp del servidor Render."""
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     file_path = tmp_file.name
     tmp_file.close()
@@ -141,6 +143,7 @@ async def diagnostico_gratis(foto: UploadFile = File(...)):
         contents = await foto.read()
         image = Image.open(io.BytesIO(contents))
         
+        # Convertir imágenes con transparencias o canales alfa a RGB estándar (JPG/PNG)
         if image.mode in ("RGBA", "P"):
             image = image.convert("RGB")
 
