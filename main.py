@@ -3,21 +3,16 @@ import io
 import json
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response
 from PIL import Image
 from google import genai
 from google.genai import types
-
-# Librerías para generación de PDF
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
+from fpdf import FPDF
 
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API para diagnóstico técnico de viviendas y derivación de inspecciones bajo normativa chilena",
-    version="2.2.0"
+    version="2.3.0"
 )
 
 app.add_middleware(
@@ -28,7 +23,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Inicializar cliente de Gemini usando la variable de entorno
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 
@@ -57,15 +51,109 @@ Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estruc
     "descripcion_problema": "Explicación clara y técnica para el propietario sobre qué ocurre en la imagen",
     "posible_causa": "Origen probable del problema",
     "normativa_chilena_asociada": "Mención explícita de la norma NCh, OGUC, SEC, manual MINVU o garantía de la Ley de Construcción que aplica",
-    "reparable_bricolaje": true_o_false,
+    "reparable_bricolaje": true,
     "pasos_reparacion": [
         "Paso 1: ...",
         "Paso 2: ..."
     ],
-    "requiere_inspector_tecnico": true_o_false,
+    "requiere_inspector_tecnico": true,
     "motivo_inspeccion": "Explicación de por qué se requiere inspección presencial de Revisa Mi Casa basándose en el riesgo, la normativa antisísmica/estructural o la pérdida de garantía"
 }
 """
+
+class PDFReport(FPDF):
+    def header(self):
+        self.set_font('Helvetica', 'B', 14)
+        self.set_text_color(15, 23, 42)
+        self.cell(0, 8, 'REVISA MI CASA - INFORME TÉCNICO PRELIMINAR', new_x="LMARGIN", new_y="NEXT", align='L')
+        self.set_font('Helvetica', '', 10)
+        self.set_text_color(37, 99, 235)
+        self.cell(0, 6, 'Evaluación de Patologías según Normativa Chilena (OGUC / LGUC / SEC)', new_x="LMARGIN", new_y="NEXT", align='L')
+        self.set_draw_color(37, 99, 235)
+        self.set_line_width(0.8)
+        self.line(10, self.get_y() + 2, 200, self.get_y() + 2)
+        self.ln(6)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Helvetica', 'I', 8)
+        self.set_text_color(100, 116, 139)
+        self.cell(0, 10, 'Informe automatizado preliminar por Revisa Mi Casa. Basado en OGUC, LGUC y normativas chilenas.', align='C')
+
+def generar_pdf_bytes(datos: dict) -> bytes:
+    pdf = PDFReport()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    # Cuadro Resumen
+    pdf.set_fill_color(248, 250, 252)
+    pdf.set_draw_color(203, 213, 225)
+    pdf.rect(10, pdf.get_y(), 190, 38, style='DF')
+    
+    start_y = pdf.get_y() + 3
+    pdf.set_xy(12, start_y)
+    
+    pdf.set_font('Helvetica', 'B', 10)
+    pdf.set_text_color(15, 23, 42)
+    
+    fields = [
+        ("Diagnóstico:", str(datos.get("titulo_diagnostico", "N/A"))),
+        ("Categoría:", str(datos.get("categoria", "N/A"))),
+        ("Nivel de Gravedad:", str(datos.get("nivel_gravedad", "N/A"))),
+        ("Normativa Asociada:", str(datos.get("normativa_chilena_asociada", "N/A")))
+    ]
+    
+    for label, val in fields:
+        pdf.set_font('Helvetica', 'B', 9)
+        pdf.cell(40, 7, label, new_x="RIGHT", new_y="TOP")
+        pdf.set_font('Helvetica', '', 9)
+        # Limpiar texto para prevenir encoding errors en FPDF
+        val_clean = val.encode('latin-1', 'replace').decode('latin-1')
+        pdf.multi_cell(145, 7, val_clean, new_x="LMARGIN", new_y="NEXT")
+        pdf.set_x(12)
+
+    pdf.set_y(start_y + 38)
+    pdf.ln(5)
+
+    # Detalle Técnico
+    sections = [
+        ("Descripción del Problema Detectado:", datos.get("descripcion_problema", "")),
+        ("Posible Causa Técnica:", datos.get("posible_causa", "")),
+    ]
+
+    for title, content in sections:
+        pdf.set_font('Helvetica', 'B', 10)
+        pdf.set_text_color(15, 23, 42)
+        pdf.cell(0, 6, title, new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font('Helvetica', '', 9)
+        pdf.set_text_color(51, 65, 85)
+        content_clean = str(content).encode('latin-1', 'replace').decode('latin-1')
+        pdf.multi_cell(0, 5, content_clean)
+        pdf.ln(3)
+
+    if datos.get("requiere_inspector_tecnico"):
+        pdf.set_font('Helvetica', 'B', 10)
+        pdf.set_text_color(220, 38, 38)
+        pdf.cell(0, 6, "RECOMENDACIÓN DE INSPECCIÓN PRESENCIAL:", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font('Helvetica', '', 9)
+        pdf.set_text_color(51, 65, 85)
+        motivo = str(datos.get("motivo_inspeccion", "")).encode('latin-1', 'replace').decode('latin-1')
+        pdf.multi_cell(0, 5, motivo)
+        pdf.ln(3)
+
+    pasos = datos.get("pasos_reparacion", [])
+    if pasos and datos.get("reparable_bricolaje"):
+        pdf.set_font('Helvetica', 'B', 10)
+        pdf.set_text_color(15, 23, 42)
+        pdf.cell(0, 6, "Pasos Sugeridos de Reparación Menor:", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font('Helvetica', '', 9)
+        pdf.set_text_color(51, 65, 85)
+        for paso in pasos:
+            paso_clean = str(paso).encode('latin-1', 'replace').decode('latin-1')
+            pdf.multi_cell(0, 5, f"- {paso_clean}")
+
+    return bytes(pdf.output())
+
 
 @app.get("/")
 def home():
@@ -76,125 +164,50 @@ def home():
     }
 
 
-def consultar_gemini(image: Image.Image) -> dict:
-    if not client:
-        raise HTTPException(
-            status_code=500,
-            detail="GEMINI_API_KEY no está configurada en las variables de entorno de Render."
-        )
-
-    response = client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=[image, PROMPT_NORMATIVA_CHILE],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
-        )
-    )
-    return json.loads(response.text)
-
-
-def construir_pdf_bytes(datos: dict) -> bytes:
-    """Genera los bytes binarios de un archivo PDF válido con ReportLab"""
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
-    styles = getSampleStyleSheet()
-
-    style_title = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor('#0F172A'), spaceAfter=8)
-    style_subtitle = ParagraphStyle('SubTitleStyle', parent=styles['Heading2'], fontSize=11, textColor=colors.HexColor('#2563EB'), spaceAfter=12)
-    style_body = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontSize=9, leading=13, textColor=colors.HexColor('#334155'))
-    style_bold = ParagraphStyle('BoldStyle', parent=style_body, fontName='Helvetica-Bold')
-
-    elements = []
-
-    # Encabezado
-    elements.append(Paragraph("REVISA MI CASA - INFORME TÉCNICO PRELIMINAR", style_title))
-    elements.append(Paragraph("Evaluación de Patologías en Edificación según Normativa Chilena (OGUC/LGUC/SEC)", style_subtitle))
-    elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563EB'), spaceAfter=12))
-
-    # Tabla
-    datos_tabla = [
-        [Paragraph("<b>Diagnóstico:</b>", style_body), Paragraph(datos.get("titulo_diagnostico", "N/A"), style_body)],
-        [Paragraph("<b>Categoría:</b>", style_body), Paragraph(datos.get("categoria", "N/A"), style_body)],
-        [Paragraph("<b>Gravedad:</b>", style_body), Paragraph(f"<b>{datos.get('nivel_gravedad', 'N/A')}</b>", style_body)],
-        [Paragraph("<b>Normativa Chilena:</b>", style_body), Paragraph(datos.get("normativa_chilena_asociada", "N/A"), style_body)]
-    ]
-    
-    t = Table(datos_tabla, colWidths=[120, 400])
-    t.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F8FAFC')),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
-        ('PADDING', (0,0), (-1,-1), 6),
-    ]))
-    elements.append(t)
-    elements.append(Spacer(1, 12))
-
-    # Detalle
-    elements.append(Paragraph("<b>Descripción del Problema Detectado:</b>", style_bold))
-    elements.append(Paragraph(datos.get("descripcion_problema", ""), style_body))
-    elements.append(Spacer(1, 8))
-
-    elements.append(Paragraph("<b>Posible Causa Técnica:</b>", style_bold))
-    elements.append(Paragraph(datos.get("posible_causa", ""), style_body))
-    elements.append(Spacer(1, 12))
-
-    if datos.get("requiere_inspector_tecnico"):
-        elements.append(Paragraph("<b>RECOMENDACIÓN DE INSPECCIÓN TÉCNICA PRESENCIAL:</b>", ParagraphStyle('AlertTitle', parent=style_bold, textColor=colors.HexColor('#DC2626'))))
-        elements.append(Paragraph(datos.get("motivo_inspeccion", ""), style_body))
-        elements.append(Spacer(1, 12))
-
-    pasos = datos.get("pasos_reparacion", [])
-    if pasos and datos.get("reparable_bricolaje"):
-        elements.append(Paragraph("<b>Pasos Sugeridos de Reparación Menor:</b>", style_bold))
-        for paso in pasos:
-            elements.append(Paragraph(f"• {paso}", style_body))
-
-    elements.append(Spacer(1, 20))
-    elements.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#CBD5E1'), spaceAfter=8))
-    elements.append(Paragraph("<i>Informe generado de manera automatizada por Revisa Mi Casa. Evaluación preliminar basada en normativas técnicas chilenas (OGUC, LGUC, SEC, RIDAA).</i>", ParagraphStyle('Footer', parent=style_body, fontSize=7, textColor=colors.HexColor('#64748B'))))
-
-    doc.build(elements)
-    return buffer.getvalue()
-
-
 @app.post("/diagnostico")
 async def diagnosticar_dano(foto: UploadFile = File(...)):
+    if not client:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
     if not foto.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="El archivo subido debe ser una imagen válida.")
+        raise HTTPException(status_code=400, detail="Debe ser una imagen válida.")
 
     try:
         contents = await foto.read()
         image = Image.open(io.BytesIO(contents))
-        resultado = consultar_gemini(image)
-
-        return {
-            "exito": True,
-            "evaluacion": resultado
-        }
+        
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[image, PROMPT_NORMATIVA_CHILE],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        return {"exito": True, "evaluacion": json.loads(response.text)}
     except Exception as e:
-        return {
-            "exito": False,
-            "error": f"Ocurrió un error al procesar la imagen: {str(e)}"
-        }
+        return {"exito": False, "error": str(e)}
 
 
 @app.post("/diagnostico/pdf")
 async def generar_reporte_pdf(foto: UploadFile = File(...)):
-    """Genera y fuerza la descarga de un archivo PDF válido"""
+    if not client:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
     if not foto.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="El archivo subido debe ser una imagen válida.")
+        raise HTTPException(status_code=400, detail="Debe ser una imagen válida.")
 
     try:
         contents = await foto.read()
         image = Image.open(io.BytesIO(contents))
-        datos = consultar_gemini(image)
-        pdf_bytes = construir_pdf_bytes(datos)
+        
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[image, PROMPT_NORMATIVA_CHILE],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        datos = json.loads(response.text)
+        pdf_bytes = generar_pdf_bytes(datos)
 
-        headers = {
-            "Content-Disposition": 'attachment; filename="informe_tecnico_revisamicasa.pdf"',
-            "Content-Type": "application/pdf"
-        }
-
-        return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
-
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": 'attachment; filename="informe_revisamicasa.pdf"'}
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al generar el PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en la generación: {str(e)}")
