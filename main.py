@@ -12,7 +12,7 @@ from fpdf import FPDF
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API para diagnóstico técnico de viviendas bajo normativa chilena",
-    version="3.0.0"
+    version="3.1.0"
 )
 
 app.add_middleware(
@@ -45,12 +45,12 @@ Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estruc
 }
 """
 
+
 def limpiar_texto(texto: str) -> str:
     """Elimina o reemplaza caracteres no soportados por las fuentes estándar de FPDF"""
     if not texto:
         return ""
     
-    # Mapeo manual de caracteres comunes en español
     reemplazos = {
         'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u',
         'Á': 'A', 'É': 'E', 'Í': 'I', 'Ó': 'O', 'Ú': 'U',
@@ -60,11 +60,11 @@ def limpiar_texto(texto: str) -> str:
     for orig, rempl in reemplazos.items():
         texto = texto.replace(orig, rempl)
     
-    # Asegurar que solo contenga caracteres latin-1 legibles
     return texto.encode('latin-1', 'ignore').decode('latin-1')
 
+
 def crear_pdf_binario(datos: dict) -> bytes:
-    """Genera el buffer de bytes binarios del PDF"""
+    """Genera la estructura en PDF y retorna los bytes binarios pura"""
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -140,7 +140,6 @@ def crear_pdf_binario(datos: dict) -> bytes:
         for paso in pasos:
             pdf.multi_cell(0, 5, f"- {limpiar_texto(str(paso))}")
 
-    # Retorna los bytes directamente
     return bytes(pdf.output())
 
 
@@ -174,7 +173,18 @@ async def diagnosticar_dano(foto: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/diagnostico/pdf")
+@app.post(
+    "/diagnostico/pdf",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"application/pdf": {}},
+            "description": "Retorna el informe técnico en formato PDF descargable.",
+        }
+    },
+    summary="Generar Informe Técnico en PDF",
+    description="Analiza la imagen enviada y genera un archivo PDF binario descargable."
+)
 async def generar_reporte_pdf(foto: UploadFile = File(...)):
     if not client:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
@@ -182,11 +192,9 @@ async def generar_reporte_pdf(foto: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Debe cargar una imagen valida.")
 
     try:
-        # 1. Leer imagen
         contents = await foto.read()
         image = Image.open(io.BytesIO(contents))
         
-        # 2. Consultar Gemini 2.5 Flash
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[image, PROMPT_NORMATIVA_CHILE],
@@ -194,16 +202,15 @@ async def generar_reporte_pdf(foto: UploadFile = File(...)):
         )
         datos_json = json.loads(response.text)
         
-        # 3. Generar PDF binario en memoria
         pdf_bytes = crear_pdf_binario(datos_json)
 
-        # 4. Devolver respuesta de bytes explícita con headers adecuados
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
             headers={
                 "Content-Disposition": "attachment; filename=informe_revisamicasa.pdf",
-                "Access-Control-Expose-Headers": "Content-Disposition"
+                "Access-Control-Expose-Headers": "Content-Disposition",
+                "Content-Type": "application/pdf"
             }
         )
     except Exception as e:
