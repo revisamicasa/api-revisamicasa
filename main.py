@@ -7,12 +7,17 @@ from fastapi.responses import Response
 from PIL import Image
 from google import genai
 from google.genai import types
-from fpdf import FPDF
+
+# Librerías para generación de PDF nativo con ReportLab
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API para diagnóstico técnico de viviendas bajo normativa chilena",
-    version="3.1.0"
+    version="3.2.0"
 )
 
 app.add_middleware(
@@ -46,101 +51,128 @@ Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estruc
 """
 
 
-def limpiar_texto(texto: str) -> str:
-    """Elimina o reemplaza caracteres no soportados por las fuentes estándar de FPDF"""
-    if not texto:
-        return ""
-    
-    reemplazos = {
-        'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u',
-        'Á': 'A', 'É': 'E', 'Í': 'I', 'Ó': 'O', 'Ú': 'U',
-        'ñ': 'n', 'Ñ': 'N', '°': ' deg ', '“': '"', '”': '"',
-        '’': "'", '–': '-', '—': '-', '¿': '', '¡': ''
-    }
-    for orig, rempl in reemplazos.items():
-        texto = texto.replace(orig, rempl)
-    
-    return texto.encode('latin-1', 'ignore').decode('latin-1')
+def generar_pdf_reportlab(datos: dict) -> bytes:
+    """Genera un archivo PDF binario perfecto usando ReportLab"""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=36,
+        leftMargin=36,
+        topMargin=36,
+        bottomMargin=36
+    )
 
+    styles = getSampleStyleSheet()
+    
+    # Estilos personalizados
+    title_style = ParagraphStyle(
+        'DocTitle',
+        parent=styles['Heading1'],
+        fontSize=16,
+        leading=20,
+        textColor=colors.HexColor('#0f172a'),
+        fontName='Helvetica-Bold'
+    )
+    
+    subtitle_style = ParagraphStyle(
+        'DocSubTitle',
+        parent=styles['Normal'],
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor('#2563eb'),
+        fontName='Helvetica-Bold'
+    )
+    
+    label_style = ParagraphStyle(
+        'FieldLabel',
+        parent=styles['Normal'],
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor('#0f172a'),
+        fontName='Helvetica-Bold'
+    )
+    
+    val_style = ParagraphStyle(
+        'FieldValue',
+        parent=styles['Normal'],
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor('#334155'),
+        fontName='Helvetica'
+    )
+    
+    section_title = ParagraphStyle(
+        'SecTitle',
+        parent=styles['Heading2'],
+        fontSize=11,
+        leading=15,
+        textColor=colors.HexColor('#0f172a'),
+        fontName='Helvetica-Bold',
+        spaceAfter=4
+    )
 
-def crear_pdf_binario(datos: dict) -> bytes:
-    """Genera la estructura en PDF y retorna los bytes binarios pura"""
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    
-    # Encabezado principal
-    pdf.set_font('Helvetica', 'B', 14)
-    pdf.set_text_color(15, 23, 42)
-    pdf.cell(0, 8, 'REVISA MI CASA - INFORME TECNICO PRELIMINAR', new_x="LMARGIN", new_y="NEXT")
-    
-    pdf.set_font('Helvetica', '', 10)
-    pdf.set_text_color(37, 99, 235)
-    pdf.cell(0, 6, 'Evaluacion de Patologias segun Normativa Chilena (OGUC / LGUC / SEC)', new_x="LMARGIN", new_y="NEXT")
-    
-    pdf.set_draw_color(37, 99, 235)
-    pdf.set_line_width(0.8)
-    pdf.line(10, pdf.get_y() + 2, 200, pdf.get_y() + 2)
-    pdf.ln(8)
+    story = []
 
-    # Resumen Ejecutivo
-    fields = [
-        ("Diagnostico:", datos.get("titulo_diagnostico", "N/A")),
-        ("Categoria:", datos.get("categoria", "N/A")),
-        ("Nivel de Gravedad:", datos.get("nivel_gravedad", "N/A")),
-        ("Normativa Asociada:", datos.get("normativa_chilena_asociada", "N/A"))
+    # Encabezado
+    story.append(Paragraph("REVISA MI CASA - INFORME TÉCNICO PRELIMINAR", title_style))
+    story.append(Paragraph("Evaluación de Patologías según Normativa Chilena (OGUC / LGUC / SEC)", subtitle_style))
+    story.append(Spacer(1, 8))
+    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563eb'), spaceAfter=12))
+
+    # Resumen Ficha Técnica (Tabla)
+    table_data = [
+        [Paragraph("Diagnóstico:", label_style), Paragraph(str(datos.get("titulo_diagnostico", "N/A")), val_style)],
+        [Paragraph("Categoría:", label_style), Paragraph(str(datos.get("categoria", "N/A")), val_style)],
+        [Paragraph("Gravedad:", label_style), Paragraph(str(datos.get("nivel_gravedad", "N/A")), val_style)],
+        [Paragraph("Normativa:", label_style), Paragraph(str(datos.get("normativa_chilena_asociada", "N/A")), val_style)]
     ]
-    
-    for label, val in fields:
-        pdf.set_font('Helvetica', 'B', 9)
-        pdf.set_text_color(15, 23, 42)
-        pdf.cell(40, 6, label, new_x="RIGHT", new_y="TOP")
-        
-        pdf.set_font('Helvetica', '', 9)
-        pdf.set_text_color(51, 65, 85)
-        pdf.multi_cell(0, 6, limpiar_texto(str(val)), new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(1)
 
-    pdf.ln(4)
+    t = Table(table_data, colWidths=[110, 430])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#f8fafc')),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('LEFTPADDING', (0, 0), (-1, -1), 6),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+        ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e1')),
+        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#e2e8f0')),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 14))
 
-    # Secciones Detalladas
-    sections = [
-        ("Descripcion del Problema Detectado:", datos.get("descripcion_problema", "")),
-        ("Posible Causa Tecnica:", datos.get("posible_causa", "")),
-    ]
+    # Descripción y Causa
+    story.append(Paragraph("Descripción del Problema Detectado:", section_title))
+    story.append(Paragraph(str(datos.get("descripcion_problema", "")), val_style))
+    story.append(Spacer(1, 10))
 
-    for title, content in sections:
-        pdf.set_font('Helvetica', 'B', 10)
-        pdf.set_text_color(15, 23, 42)
-        pdf.cell(0, 6, title, new_x="LMARGIN", new_y="NEXT")
-        
-        pdf.set_font('Helvetica', '', 9)
-        pdf.set_text_color(51, 65, 85)
-        pdf.multi_cell(0, 5, limpiar_texto(str(content)))
-        pdf.ln(3)
+    story.append(Paragraph("Posible Causa Técnica:", section_title))
+    story.append(Paragraph(str(datos.get("posible_causa", "")), val_style))
+    story.append(Spacer(1, 10))
 
+    # Recomendación de Inspección
     if datos.get("requiere_inspector_tecnico"):
-        pdf.set_font('Helvetica', 'B', 10)
-        pdf.set_text_color(220, 38, 38)
-        pdf.cell(0, 6, "RECOMENDACION DE INSPECCION PRESENCIAL:", new_x="LMARGIN", new_y="NEXT")
-        
-        pdf.set_font('Helvetica', '', 9)
-        pdf.set_text_color(51, 65, 85)
-        pdf.multi_cell(0, 5, limpiar_texto(str(datos.get("motivo_inspeccion", ""))))
-        pdf.ln(3)
+        alert_style = ParagraphStyle(
+            'AlertTitle',
+            parent=section_title,
+            textColor=colors.HexColor('#dc2626')
+        )
+        story.append(Paragraph("RECOMENDACIÓN DE INSPECCIÓN PRESENCIAL:", alert_style))
+        story.append(Paragraph(str(datos.get("motivo_inspeccion", "")), val_style))
+        story.append(Spacer(1, 10))
 
+    # Pasos de Reparación
     pasos = datos.get("pasos_reparacion", [])
     if pasos and datos.get("reparable_bricolaje"):
-        pdf.set_font('Helvetica', 'B', 10)
-        pdf.set_text_color(15, 23, 42)
-        pdf.cell(0, 6, "Pasos Sugeridos de Reparacion Menor:", new_x="LMARGIN", new_y="NEXT")
-        
-        pdf.set_font('Helvetica', '', 9)
-        pdf.set_text_color(51, 65, 85)
+        story.append(Paragraph("Pasos Sugeridos de Reparación Menor:", section_title))
         for paso in pasos:
-            pdf.multi_cell(0, 5, f"- {limpiar_texto(str(paso))}")
+            story.append(Paragraph(f"• {paso}", val_style))
+            story.append(Spacer(1, 2))
 
-    return bytes(pdf.output())
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 @app.get("/")
@@ -157,7 +189,7 @@ async def diagnosticar_dano(foto: UploadFile = File(...)):
     if not client:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
     if not foto.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Debe cargar una imagen valida.")
+        raise HTTPException(status_code=400, detail="Debe cargar una imagen válida.")
 
     try:
         contents = await foto.read()
@@ -189,7 +221,7 @@ async def generar_reporte_pdf(foto: UploadFile = File(...)):
     if not client:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
     if not foto.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Debe cargar una imagen valida.")
+        raise HTTPException(status_code=400, detail="Debe cargar una imagen válida.")
 
     try:
         contents = await foto.read()
@@ -202,16 +234,16 @@ async def generar_reporte_pdf(foto: UploadFile = File(...)):
         )
         datos_json = json.loads(response.text)
         
-        pdf_bytes = crear_pdf_binario(datos_json)
+        # Generar bytes con ReportLab
+        pdf_bytes = generar_pdf_reportlab(datos_json)
 
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
             headers={
                 "Content-Disposition": "attachment; filename=informe_revisamicasa.pdf",
-                "Access-Control-Expose-Headers": "Content-Disposition",
-                "Content-Type": "application/pdf"
+                "Access-Control-Expose-Headers": "Content-Disposition"
             }
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en la generacion del PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en la generación del PDF: {str(e)}")
