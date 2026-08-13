@@ -1,10 +1,10 @@
 import os
 import io
 import json
-import tempfile
+import re
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from PIL import Image
 from google import genai
 from google.genai import types
@@ -17,10 +17,10 @@ from reportlab.lib import colors
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API para diagnóstico técnico de viviendas bajo normativa chilena",
-    version="8.5.0"
+    version="10.0.0"
 )
 
-# Configuración de CORS amplia para cPanel, localhost y el dominio revisamicasa.cl
+# Configuración de CORS para permitir peticiones desde cualquier origen
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,14 +29,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+# Detección flexible de la clave API (prioriza variables de entorno)
+GEMINI_KEY = (
+    os.environ.get("GEMINI_API_KEY") or 
+    os.environ.get("GOOGLE_API_KEY") or 
+    os.environ.get("API_KEY")
+)
+
 client = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 
 PROMPT_NORMATIVA_CHILE = """
 Actúa como un Inspector Técnico de Obras (ITO) y Perito Judicial de Edificación en Chile para 'Revisa Mi Casa'.
 Analiza la fotografía adjunta que muestra una falla, daño o patología en una edificación ubicada en Chile.
 
-Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estructura exacta:
+Debes responder EXCLUSIVAMENTE en un objeto JSON válido sin bloques markdown con la siguiente estructura exacta:
 {
     "titulo_diagnostico": "Nombre técnico de la falla",
     "categoria": "Pintura / Humedad / Estructura / Electricidad / Gasitería / Ventanales / Terminaciones",
@@ -53,14 +59,32 @@ Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estruc
 }
 """
 
-def generar_pdf_reportlab(datos: dict) -> str:
-    """Genera un archivo PDF físico en la carpeta temporal /tmp del servidor Render."""
-    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    file_path = tmp_file.name
-    tmp_file.close()
+def limpiar_respuesta_json(texto: str) -> dict:
+    """Limpia etiquetas de bloque markdown en el texto de respuesta de Gemini."""
+    texto_limpio = re.sub(r'```(?:json)?\s*([\s\S]*?)\s*```', r'\1', texto).strip()
+    try:
+        return json.loads(texto_limpio)
+    except Exception:
+        # Respuesta de respaldo si la respuesta no es un JSON estructurado perfecto
+        return {
+            "titulo_diagnostico": "Inspección Técnica Preliminar",
+            "categoria": "General",
+            "nivel_gravedad": "Por determinar",
+            "descripcion_problema": texto,
+            "posible_causa": "Se requiere inspección presencial en terreno.",
+            "normativa_chilena_asociada": "OGUC / NCh",
+            "estimacion_costo_reparacion": "A evaluar",
+            "materiales_requeridos": ["Evaluación técnica especializada"],
+            "pasos_reparacion": ["Consultar con un inspector de Revisa Mi Casa"],
+            "requiere_inspector_tecnico": True,
+            "motivo_inspeccion": "Verificación directa en obra."
+        }
 
+def generar_pdf_reportlab(datos: dict) -> bytes:
+    """Genera el flujo binario del informe PDF en memoria utilizando ReportLab."""
+    buffer = io.BytesIO()
     doc = SimpleDocTemplate(
-        file_path,
+        buffer,
         pagesize=letter,
         rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36
     )
@@ -107,14 +131,14 @@ def generar_pdf_reportlab(datos: dict) -> str:
     story.append(Spacer(1, 8))
 
     materiales = datos.get("materiales_requeridos", [])
-    if materiales:
+    if isinstance(materiales, list) and materiales:
         story.append(Paragraph("Materiales y Herramientas Sugeridas:", sec_title))
         for mat in materiales:
             story.append(Paragraph(f"• {mat}", val_style))
         story.append(Spacer(1, 8))
 
     pasos = datos.get("pasos_reparacion", [])
-    if pasos:
+    if isinstance(pasos, list) and pasos:
         story.append(Paragraph("Pasos de Reparación Recomendados:", sec_title))
         for idx, paso in enumerate(pasos, 1):
             story.append(Paragraph(f"{idx}. {paso}", val_style))
@@ -123,10 +147,11 @@ def generar_pdf_reportlab(datos: dict) -> str:
     if datos.get("requiere_inspector_tecnico"):
         alert_style = ParagraphStyle('AlertTitle', parent=sec_title, textColor=colors.HexColor('#dc2626'))
         story.append(Paragraph("RECOMENDACIÓN DE INSPECCIÓN PRESENCIAL ITO:", alert_style))
-        story.append(Paragraph(str(datos.get("motivo_inspeccion", "")), val_style))
+        story.append(Paragraph(str(datos.get("motivo_inspeccion", "Se recomienda la evaluación presencial de un profesional.")), val_style))
 
     doc.build(story)
-    return file_path
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 @app.get("/")
@@ -137,13 +162,13 @@ def home():
 @app.post("/diagnostico-gratis")
 async def diagnostico_gratis(foto: UploadFile = File(...)):
     if not client:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada en el servidor.")
 
     try:
         contents = await foto.read()
         image = Image.open(io.BytesIO(contents))
         
-        # Convertir imágenes con transparencias o canales alfa a RGB estándar (JPG/PNG)
+        # Convierte paletas o transparencias PNG/RGBA a RGB estándar
         if image.mode in ("RGBA", "P"):
             image = image.convert("RGB")
 
@@ -153,13 +178,16 @@ async def diagnostico_gratis(foto: UploadFile = File(...)):
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         
-        datos = json.loads(res.text)
-        pdf_path = generar_pdf_reportlab(datos)
+        datos = limpiar_respuesta_json(res.text)
+        pdf_bytes = generar_pdf_reportlab(datos)
 
-        return FileResponse(
-            path=pdf_path,
-            filename="Informe_Tecnico_RevisaMiCasa.pdf",
-            media_type="application/pdf"
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": "attachment; filename=Informe_Diagnostico.pdf",
+                "Content-Type": "application/pdf"
+            }
         )
 
     except Exception as e:
