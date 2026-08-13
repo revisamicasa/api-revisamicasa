@@ -6,8 +6,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from PIL import Image
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
@@ -17,10 +16,9 @@ from reportlab.lib import colors
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API para diagnóstico técnico de viviendas bajo normativa chilena",
-    version="10.0.0"
+    version="11.0.0"
 )
 
-# Configuración de CORS para permitir peticiones desde cualquier origen
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,20 +27,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Detección flexible de la clave API (prioriza variables de entorno)
+# Captura de la API Key desde cualquier variable de entorno posible
 GEMINI_KEY = (
     os.environ.get("GEMINI_API_KEY") or 
     os.environ.get("GOOGLE_API_KEY") or 
     os.environ.get("API_KEY")
 )
 
-client = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
+if GEMINI_KEY:
+    genai.configure(api_key=GEMINI_KEY.strip())
 
 PROMPT_NORMATIVA_CHILE = """
 Actúa como un Inspector Técnico de Obras (ITO) y Perito Judicial de Edificación en Chile para 'Revisa Mi Casa'.
 Analiza la fotografía adjunta que muestra una falla, daño o patología en una edificación ubicada en Chile.
 
-Debes responder EXCLUSIVAMENTE en un objeto JSON válido sin bloques markdown con la siguiente estructura exacta:
+Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estructura exactas:
 {
     "titulo_diagnostico": "Nombre técnico de la falla",
     "categoria": "Pintura / Humedad / Estructura / Electricidad / Gasitería / Ventanales / Terminaciones",
@@ -60,12 +59,11 @@ Debes responder EXCLUSIVAMENTE en un objeto JSON válido sin bloques markdown co
 """
 
 def limpiar_respuesta_json(texto: str) -> dict:
-    """Limpia etiquetas de bloque markdown en el texto de respuesta de Gemini."""
+    """Limpia la respuesta de Gemini eliminando bloques markdown de código."""
     texto_limpio = re.sub(r'```(?:json)?\s*([\s\S]*?)\s*```', r'\1', texto).strip()
     try:
         return json.loads(texto_limpio)
     except Exception:
-        # Respuesta de respaldo si la respuesta no es un JSON estructurado perfecto
         return {
             "titulo_diagnostico": "Inspección Técnica Preliminar",
             "categoria": "General",
@@ -81,7 +79,6 @@ def limpiar_respuesta_json(texto: str) -> dict:
         }
 
 def generar_pdf_reportlab(datos: dict) -> bytes:
-    """Genera el flujo binario del informe PDF en memoria utilizando ReportLab."""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -161,22 +158,19 @@ def home():
 
 @app.post("/diagnostico-gratis")
 async def diagnostico_gratis(foto: UploadFile = File(...)):
-    if not client:
+    if not GEMINI_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada en el servidor.")
 
     try:
         contents = await foto.read()
         image = Image.open(io.BytesIO(contents))
         
-        # Convierte paletas o transparencias PNG/RGBA a RGB estándar
         if image.mode in ("RGBA", "P"):
             image = image.convert("RGB")
 
-        res = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[image, PROMPT_NORMATIVA_CHILE],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
+        # Modelo estándar multimodal
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        res = model.generate_content([PROMPT_NORMATIVA_CHILE, image])
         
         datos = limpiar_respuesta_json(res.text)
         pdf_bytes = generar_pdf_reportlab(datos)
