@@ -3,7 +3,7 @@ import io
 import json
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from PIL import Image
 from google import genai
 from google.genai import types
@@ -17,7 +17,7 @@ from reportlab.lib import colors
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API para diagnóstico técnico de viviendas y derivación de inspecciones bajo normativa chilena",
-    version="2.1.0"
+    version="2.2.0"
 )
 
 app.add_middleware(
@@ -55,8 +55,8 @@ Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estruc
     "categoria": "Pintura / Humedad / Estructura / Electricidad / Gasitería / Ventanales / Terminaciones",
     "nivel_gravedad": "Baja / Media / Alta / Crítica",
     "descripcion_problema": "Explicación clara y técnica para el propietario sobre qué ocurre en la imagen",
-    "posible_causa": "Origen probable del problema (ej: asentamiento, choque térmico, mala ejecución según técnica constructiva)",
-    "normativa_chilena_asociada": "Mención explícita de la norma NCh, OGUC, SEC, manual MINVU o garantía de la Ley de Construcción que aplica (ej: 'Falla en terminación, garantía legal de 3 años según LGUC')",
+    "posible_causa": "Origen probable del problema",
+    "normativa_chilena_asociada": "Mención explícita de la norma NCh, OGUC, SEC, manual MINVU o garantía de la Ley de Construcción que aplica",
     "reparable_bricolaje": true_o_false,
     "pasos_reparacion": [
         "Paso 1: ...",
@@ -77,7 +77,6 @@ def home():
 
 
 def consultar_gemini(image: Image.Image) -> dict:
-    """Función auxiliar para procesar la imagen con Gemini Vision"""
     if not client:
         raise HTTPException(
             status_code=500,
@@ -94,9 +93,71 @@ def consultar_gemini(image: Image.Image) -> dict:
     return json.loads(response.text)
 
 
+def construir_pdf_bytes(datos: dict) -> bytes:
+    """Genera los bytes binarios de un archivo PDF válido con ReportLab"""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    styles = getSampleStyleSheet()
+
+    style_title = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor('#0F172A'), spaceAfter=8)
+    style_subtitle = ParagraphStyle('SubTitleStyle', parent=styles['Heading2'], fontSize=11, textColor=colors.HexColor('#2563EB'), spaceAfter=12)
+    style_body = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontSize=9, leading=13, textColor=colors.HexColor('#334155'))
+    style_bold = ParagraphStyle('BoldStyle', parent=style_body, fontName='Helvetica-Bold')
+
+    elements = []
+
+    # Encabezado
+    elements.append(Paragraph("REVISA MI CASA - INFORME TÉCNICO PRELIMINAR", style_title))
+    elements.append(Paragraph("Evaluación de Patologías en Edificación según Normativa Chilena (OGUC/LGUC/SEC)", style_subtitle))
+    elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563EB'), spaceAfter=12))
+
+    # Tabla
+    datos_tabla = [
+        [Paragraph("<b>Diagnóstico:</b>", style_body), Paragraph(datos.get("titulo_diagnostico", "N/A"), style_body)],
+        [Paragraph("<b>Categoría:</b>", style_body), Paragraph(datos.get("categoria", "N/A"), style_body)],
+        [Paragraph("<b>Gravedad:</b>", style_body), Paragraph(f"<b>{datos.get('nivel_gravedad', 'N/A')}</b>", style_body)],
+        [Paragraph("<b>Normativa Chilena:</b>", style_body), Paragraph(datos.get("normativa_chilena_asociada", "N/A"), style_body)]
+    ]
+    
+    t = Table(datos_tabla, colWidths=[120, 400])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F8FAFC')),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
+        ('PADDING', (0,0), (-1,-1), 6),
+    ]))
+    elements.append(t)
+    elements.append(Spacer(1, 12))
+
+    # Detalle
+    elements.append(Paragraph("<b>Descripción del Problema Detectado:</b>", style_bold))
+    elements.append(Paragraph(datos.get("descripcion_problema", ""), style_body))
+    elements.append(Spacer(1, 8))
+
+    elements.append(Paragraph("<b>Posible Causa Técnica:</b>", style_bold))
+    elements.append(Paragraph(datos.get("posible_causa", ""), style_body))
+    elements.append(Spacer(1, 12))
+
+    if datos.get("requiere_inspector_tecnico"):
+        elements.append(Paragraph("<b>RECOMENDACIÓN DE INSPECCIÓN TÉCNICA PRESENCIAL:</b>", ParagraphStyle('AlertTitle', parent=style_bold, textColor=colors.HexColor('#DC2626'))))
+        elements.append(Paragraph(datos.get("motivo_inspeccion", ""), style_body))
+        elements.append(Spacer(1, 12))
+
+    pasos = datos.get("pasos_reparacion", [])
+    if pasos and datos.get("reparable_bricolaje"):
+        elements.append(Paragraph("<b>Pasos Sugeridos de Reparación Menor:</b>", style_bold))
+        for paso in pasos:
+            elements.append(Paragraph(f"• {paso}", style_body))
+
+    elements.append(Spacer(1, 20))
+    elements.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#CBD5E1'), spaceAfter=8))
+    elements.append(Paragraph("<i>Informe generado de manera automatizada por Revisa Mi Casa. Evaluación preliminar basada en normativas técnicas chilenas (OGUC, LGUC, SEC, RIDAA).</i>", ParagraphStyle('Footer', parent=style_body, fontSize=7, textColor=colors.HexColor('#64748B'))))
+
+    doc.build(elements)
+    return buffer.getvalue()
+
+
 @app.post("/diagnostico")
 async def diagnosticar_dano(foto: UploadFile = File(...)):
-    """Retorna el diagnóstico técnico en formato JSON"""
     if not foto.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="El archivo subido debe ser una imagen válida.")
 
@@ -118,7 +179,7 @@ async def diagnosticar_dano(foto: UploadFile = File(...)):
 
 @app.post("/diagnostico/pdf")
 async def generar_reporte_pdf(foto: UploadFile = File(...)):
-    """Genera y descarga un Informe Técnico Oficial en formato PDF"""
+    """Genera y fuerza la descarga de un archivo PDF válido"""
     if not foto.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="El archivo subido debe ser una imagen válida.")
 
@@ -126,77 +187,14 @@ async def generar_reporte_pdf(foto: UploadFile = File(...)):
         contents = await foto.read()
         image = Image.open(io.BytesIO(contents))
         datos = consultar_gemini(image)
+        pdf_bytes = construir_pdf_bytes(datos)
 
-        # Crear el PDF en memoria
-        buffer = io.BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
-        styles = getSampleStyleSheet()
+        headers = {
+            "Content-Disposition": 'attachment; filename="informe_tecnico_revisamicasa.pdf"',
+            "Content-Type": "application/pdf"
+        }
 
-        # Estilos personalizados
-        style_title = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=18, textColor=colors.HexColor('#0F172A'), spaceAfter=10)
-        style_subtitle = ParagraphStyle('SubTitleStyle', parent=styles['Heading2'], fontSize=12, textColor=colors.HexColor('#2563EB'), spaceAfter=15)
-        style_body = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontSize=10, leading=14, textColor=colors.HexColor('#334155'))
-        style_bold = ParagraphStyle('BoldStyle', parent=style_body, fontName='Helvetica-Bold')
-
-        elements = []
-
-        # Encabezado del Informe
-        elements.append(Paragraph("REVISA MI CASA - INFORME TÉCNICO DE PRE EVALUACIÓN", style_title))
-        elements.append(Paragraph("Evaluación Preliminar de Patología en Edificación (Normativa Chilena)", style_subtitle))
-        elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563EB'), spaceAfter=15))
-
-        # Tabla resumen
-        datos_tabla = [
-            [Paragraph("<b>Diagnóstico:</b>", style_body), Paragraph(datos.get("titulo_diagnostico", "N/A"), style_body)],
-            [Paragraph("<b>Categoría:</b>", style_body), Paragraph(datos.get("categoria", "N/A"), style_body)],
-            [Paragraph("<b>Nivel de Gravedad:</b>", style_body), Paragraph(f"<b>{datos.get('nivel_gravedad', 'N/A')}</b>", style_body)],
-            [Paragraph("<b>Normativa Asociada:</b>", style_body), Paragraph(datos.get("normativa_chilena_asociada", "N/A"), style_body)]
-        ]
-        
-        t = Table(datos_tabla, colWidths=[130, 390])
-        t.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F8FAFC')),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
-            ('PADDING', (0,0), (-1,-1), 8),
-        ]))
-        elements.append(t)
-        elements.append(Spacer(1, 15))
-
-        # Detalle técnico
-        elements.append(Paragraph("<b>Descripción del Problema Detectado:</b>", style_bold))
-        elements.append(Paragraph(datos.get("descripcion_problema", ""), style_body))
-        elements.append(Spacer(1, 10))
-
-        elements.append(Paragraph("<b>Posible Causa:</b>", style_bold))
-        elements.append(Paragraph(datos.get("posible_causa", ""), style_body))
-        elements.append(Spacer(1, 15))
-
-        # Recomendación de Inspección
-        if datos.get("requiere_inspector_tecnico"):
-            elements.append(Paragraph("<b>RECOMENDACIÓN DE INSPECCIÓN PRESENCIAL:</b>", ParagraphStyle('AlertTitle', parent=style_bold, textColor=colors.HexColor('#DC2626'))))
-            elements.append(Paragraph(datos.get("motivo_inspeccion", ""), style_body))
-            elements.append(Spacer(1, 15))
-
-        # Pasos de reparación
-        pasos = datos.get("pasos_reparacion", [])
-        if pasos and datos.get("reparable_bricolaje"):
-            elements.append(Paragraph("<b>Pasos Sugeridos para Reparación Menor:</b>", style_bold))
-            for paso in pasos:
-                elements.append(Paragraph(f"• {paso}", style_body))
-
-        elements.append(Spacer(1, 25))
-        elements.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#CBD5E1'), spaceAfter=10))
-        elements.append(Paragraph("<i>Este informe es una evaluación digital preliminar generada por el sistema de Visión de Revisa Mi Casa basándose en normativas chilenas (OGUC/LGUC/SEC). No reemplaza un peritaje judicial o un Informe de Inspección Técnica de Obras (ITO) presencial.</i>", ParagraphStyle('Footer', parent=style_body, fontSize=8, textColor=colors.HexColor('#64748B'))))
-
-        # Construir PDF
-        doc.build(elements)
-        buffer.seek(0)
-
-        return StreamingResponse(
-            buffer,
-            media_type="application/pdf",
-            headers={"Content-Disposition": "attachment; filename=informe_tecnico_revisamicasa.pdf"}
-        )
+        return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al generar el PDF: {str(e)}")
