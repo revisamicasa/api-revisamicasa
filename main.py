@@ -15,8 +15,8 @@ from reportlab.lib import colors
 
 app = FastAPI(
     title="Revisa Mi Casa API",
-    description="API de diagnósticos técnicos bajo normativa chilena",
-    version="4.2.0"
+    description="API para diagnóstico técnico de viviendas bajo normativa chilena",
+    version="5.0.0"
 )
 
 app.add_middleware(
@@ -30,24 +30,16 @@ app.add_middleware(
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 
-PROMPT_PRELIMINAR = """
-Actúa como Inspector Técnico de Obras (ITO) de 'Revisa Mi Casa' en Chile.
-Analiza la imagen adjunta y genera un JSON con esta estructura exacta:
-{
-    "resultado_preliminar": "Evaluación preliminar completada",
-    "tipo_falla": "Breve resumen de la falla detectada",
-    "mensaje": "Hemos detectado una posible falla en revestimiento/estructura."
-}
-"""
+PROMPT_NORMATIVA_CHILE = """
+Actúa como un Inspector Técnico de Obras (ITO) y Perito Judicial de Edificación en Chile para 'Revisa Mi Casa'.
+Analiza la fotografía adjunta que muestra una falla, daño o patología en una edificación ubicada en Chile.
 
-PROMPT_DETALLADO = """
-Actúa como Inspector Técnico de Obras (ITO) y Perito Judicial de Edificación en Chile para 'Revisa Mi Casa'.
-Analiza la imagen y genera un JSON con la siguiente estructura:
+Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estructura exacta:
 {
     "titulo_diagnostico": "Nombre técnico de la falla",
     "categoria": "Pintura / Humedad / Estructura / Electricidad / Gasitería / Ventanales / Terminaciones",
     "nivel_gravedad": "Baja / Media / Alta / Crítica",
-    "descripcion_problema": "Explicación clara y técnica",
+    "descripcion_problema": "Explicación clara y técnica para el propietario",
     "posible_causa": "Origen probable del problema",
     "normativa_chilena_asociada": "Mención explícita de norma NCh, OGUC, SEC, MINVU o LGUC",
     "reparable_bricolaje": true,
@@ -78,7 +70,7 @@ def generar_pdf_reportlab(datos: dict) -> bytes:
 
     story = []
 
-    story.append(Paragraph("REVISA MI CASA - INFORME TÉCNICO DETALLADO", title_style))
+    story.append(Paragraph("REVISA MI CASA - INFORME TÉCNICO PRELIMINAR", title_style))
     story.append(Paragraph("Evaluación Normativa y Guía de Reparación (OGUC / LGUC / SEC / NCh)", subtitle_style))
     story.append(Spacer(1, 8))
     story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563eb'), spaceAfter=12))
@@ -139,54 +131,21 @@ def home():
     return {"status": "online", "servicio": "API Revisa Mi Casa"}
 
 
-@app.post("/evaluar-gratis")
-async def evaluar_gratis(foto: UploadFile = File(...)):
-    if not client:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
-
-    try:
-        contents = await foto.read()
-        image = Image.open(io.BytesIO(contents))
-
-        res = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[image, PROMPT_PRELIMINAR],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-        datos = json.loads(res.text)
-
-        return {
-            "resultado_preliminar": datos.get("resultado_preliminar", "Evaluación preliminar completada"),
-            "tipo_falla": datos.get("tipo_falla", "Requiere revisión detallada"),
-            "mensaje": datos.get("mensaje", "Hemos detectado una posible falla en revestimiento/estructura."),
-            "opciones": {
-                "informe_detallado_pago": {
-                    "precio_clp": 3990,
-                    "incluye": "Lista de materiales, paso a paso de reparación y estimación de costos."
-                },
-                "agendar_inspector": {
-                    "recomendado": True,
-                    "mensaje": "Si prefieres no reparar tú mismo, podemos enviar un inspector técnico de Revisa Mi Casa."
-                }
-            }
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.post(
-    "/descargar-informe-pago",
+    "/diagnostico-gratis",
     response_class=Response,
     responses={
         200: {
             "content": {"application/pdf": {}},
-            "description": "Retorna el informe técnico detallado en formato PDF."
+            "description": "Retorna el informe técnico preliminar en formato PDF."
         }
     }
 )
-async def descargar_informe_pago(foto: UploadFile = File(...)):
+async def diagnostico_gratis(foto: UploadFile = File(...)):
     if not client:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
+    if not foto.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Debe cargar una imagen válida.")
 
     try:
         contents = await foto.read()
@@ -194,20 +153,20 @@ async def descargar_informe_pago(foto: UploadFile = File(...)):
 
         res = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=[image, PROMPT_DETALLADO],
+            contents=[image, PROMPT_NORMATIVA_CHILE],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        datos_detallados = json.loads(res.text)
+        datos = json.loads(res.text)
 
-        pdf_bytes = generar_pdf_reportlab(datos_detallados)
+        pdf_bytes = generar_pdf_reportlab(datos)
 
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": "attachment; filename=Informe_Detallado_RevisaMiCasa.pdf",
+                "Content-Disposition": "attachment; filename=Informe_RevisaMiCasa.pdf",
                 "Access-Control-Expose-Headers": "Content-Disposition"
             }
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Error en la generación del PDF: {str(e)}")
