@@ -1,11 +1,11 @@
 import os
 import io
 import json
+import tempfile
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse
 from PIL import Image
-import pillow_heif  # Soporte para fotos de iPhone (.heic)
 from google import genai
 from google.genai import types
 
@@ -14,13 +14,10 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
-# Registrar decodificador HEIF/HEIC para Pillow
-pillow_heif.register_heif_opener()
-
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API para diagnóstico técnico de viviendas bajo normativa chilena",
-    version="6.0.0"
+    version="8.0.0"
 )
 
 app.add_middleware(
@@ -55,29 +52,30 @@ Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estruc
 }
 """
 
+def generar_pdf_reportlab(datos: dict) -> str:
+    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    file_path = tmp_file.name
+    tmp_file.close()
 
-def generar_pdf_reportlab(datos: dict) -> bytes:
-    buffer = io.BytesIO()
     doc = SimpleDocTemplate(
-        buffer,
+        file_path,
         pagesize=letter,
         rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36
     )
 
     styles = getSampleStyleSheet()
-    
     title_style = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=16, leading=20, textColor=colors.HexColor('#0f172a'), fontName='Helvetica-Bold')
     subtitle_style = ParagraphStyle('SubTitle', parent=styles['Normal'], fontSize=10, leading=14, textColor=colors.HexColor('#2563eb'), fontName='Helvetica-Bold')
     label_style = ParagraphStyle('Label', parent=styles['Normal'], fontSize=9, leading=12, textColor=colors.HexColor('#0f172a'), fontName='Helvetica-Bold')
     val_style = ParagraphStyle('Val', parent=styles['Normal'], fontSize=9, leading=12, textColor=colors.HexColor('#334155'), fontName='Helvetica')
     sec_title = ParagraphStyle('SecTitle', parent=styles['Heading2'], fontSize=11, leading=15, textColor=colors.HexColor('#0f172a'), fontName='Helvetica-Bold', spaceAfter=4)
 
-    story = []
-
-    story.append(Paragraph("REVISA MI CASA - INFORME TÉCNICO PRELIMINAR", title_style))
-    story.append(Paragraph("Evaluación Normativa y Guía de Reparación (OGUC / LGUC / SEC / NCh)", subtitle_style))
-    story.append(Spacer(1, 8))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563eb'), spaceAfter=12))
+    story = [
+        Paragraph("REVISA MI CASA - INFORME TÉCNICO PRELIMINAR", title_style),
+        Paragraph("Evaluación Normativa y Guía de Reparación (OGUC / LGUC / SEC / NCh)", subtitle_style),
+        Spacer(1, 8),
+        HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563eb'), spaceAfter=12)
+    ]
 
     table_data = [
         [Paragraph("Diagnóstico:", label_style), Paragraph(str(datos.get("titulo_diagnostico", "N/A")), val_style)],
@@ -126,8 +124,7 @@ def generar_pdf_reportlab(datos: dict) -> bytes:
         story.append(Paragraph(str(datos.get("motivo_inspeccion", "")), val_style))
 
     doc.build(story)
-    buffer.seek(0)
-    return buffer.getvalue()
+    return file_path
 
 
 @app.get("/")
@@ -135,32 +132,18 @@ def home():
     return {"status": "online", "servicio": "API Revisa Mi Casa"}
 
 
-@app.post(
-    "/diagnostico-gratis",
-    response_class=Response,
-    responses={
-        200: {
-            "content": {"application/pdf": {}},
-            "description": "Retorna el informe técnico preliminar compilado en PDF."
-        }
-    }
-)
+@app.post("/diagnostico-gratis")
 async def diagnostico_gratis(foto: UploadFile = File(...)):
     if not client:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada en las variables de entorno.")
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
 
     try:
-        # Leer el contenido binario del archivo subido
         contents = await foto.read()
-        
-        # Procesar la imagen (Soporta HEIC, JPG, PNG)
         image = Image.open(io.BytesIO(contents))
         
-        # Si la imagen está en formato HEIC o RGBA, convertir a RGB para la API de Gemini
         if image.mode in ("RGBA", "P"):
             image = image.convert("RGB")
 
-        # Consultar la API de Gemini
         res = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[image, PROMPT_NORMATIVA_CHILE],
@@ -168,22 +151,13 @@ async def diagnostico_gratis(foto: UploadFile = File(...)):
         )
         
         datos = json.loads(res.text)
+        pdf_path = generar_pdf_reportlab(datos)
 
-        # Generar el archivo PDF en memoria
-        pdf_bytes = generar_pdf_reportlab(datos)
-
-        # Retornar el flujo de bytes binarios puro
-        return Response(
-            content=pdf_bytes,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": "attachment; filename=Informe_RevisaMiCasa.pdf",
-                "Access-Control-Expose-Headers": "Content-Disposition"
-            }
+        return FileResponse(
+            path=pdf_path,
+            filename="Informe_Tecnico_RevisaMiCasa.pdf",
+            media_type="application/pdf"
         )
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Error al procesar la imagen o generar el PDF: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error al procesar la solicitud: {str(e)}")
