@@ -11,8 +11,8 @@ from fpdf import FPDF
 
 app = FastAPI(
     title="Revisa Mi Casa API",
-    description="API para diagnóstico técnico de viviendas y derivación de inspecciones bajo normativa chilena",
-    version="2.3.0"
+    description="API para diagnóstico técnico de viviendas bajo normativa chilena",
+    version="3.0.0"
 )
 
 app.add_middleware(
@@ -27,131 +27,120 @@ GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 
 PROMPT_NORMATIVA_CHILE = """
-Actúa como un Inspector Técnico de Obras (ITO) y Perito Judicial de Edificación en Chile para 'Revisa Mi Casa', con sólidos conocimientos respaldados por la academia y la normativa chilena vigente.
-
+Actúa como un Inspector Técnico de Obras (ITO) y Perito Judicial de Edificación en Chile para 'Revisa Mi Casa'.
 Analiza la fotografía adjunta que muestra una falla, daño o patología en una edificación ubicada en Chile.
-
-Debes evaluar el daño y fundamentar tu diagnóstico aplicando estrictamente:
-1. MARCO LEGAL Y NORMATIVO EN CHILE:
-   - Ordenanza General de Urbanismo y Construcciones (OGUC).
-   - Ley General de Urbanismo y Construcciones (LGUC) respecto a plazos de garantía legal (Ley N° 20.016: 10 años para fallas estructurales, 5 años para instalaciones y 3 años para elementos de terminaciones).
-   - Normativa de Seguridad Eléctrica SEC (Pliegos Técnicos RIC) y Normativa Sanitaria/Gasitería (RIDAA).
-   - Normativa y Reglamentación Antisísmica en Chile (NCh433, NCh3171).
-
-2. ESTÁNDARES TÉCNICOS Y LITERATURA ESPECIALIZADA:
-   - Manuales Técnicos del Ministerio de Vivienda y Urbanismo (MINVU).
-   - Principios de ingeniería y patología de la edificación expuestos en "Procesos y técnicas de construcción" (G. Thenoux Z. y H. de Solminihac).
-   - Criterios de inspección técnica, patologías constructivas y diagnósticos validados por la investigación académica de las facultades de ingeniería y construcción en Chile (U. de Chile, Pontificia Universidad Católica de Chile, UBB y U. de Valparaíso).
 
 Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estructura exacta:
 {
-    "titulo_diagnostico": "Nombre técnico y preciso de la patología o falla detectada",
+    "titulo_diagnostico": "Nombre técnico de la falla",
     "categoria": "Pintura / Humedad / Estructura / Electricidad / Gasitería / Ventanales / Terminaciones",
     "nivel_gravedad": "Baja / Media / Alta / Crítica",
-    "descripcion_problema": "Explicación clara y técnica para el propietario sobre qué ocurre en la imagen",
+    "descripcion_problema": "Explicación clara y técnica para el propietario",
     "posible_causa": "Origen probable del problema",
-    "normativa_chilena_asociada": "Mención explícita de la norma NCh, OGUC, SEC, manual MINVU o garantía de la Ley de Construcción que aplica",
+    "normativa_chilena_asociada": "Mención explícita de norma NCh, OGUC, SEC, MINVU o LGUC",
     "reparable_bricolaje": true,
-    "pasos_reparacion": [
-        "Paso 1: ...",
-        "Paso 2: ..."
-    ],
+    "pasos_reparacion": ["Paso 1", "Paso 2"],
     "requiere_inspector_tecnico": true,
-    "motivo_inspeccion": "Explicación de por qué se requiere inspección presencial de Revisa Mi Casa basándose en el riesgo, la normativa antisísmica/estructural o la pérdida de garantía"
+    "motivo_inspeccion": "Justificación de la inspección presencial"
 }
 """
 
-class PDFReport(FPDF):
-    def header(self):
-        self.set_font('Helvetica', 'B', 14)
-        self.set_text_color(15, 23, 42)
-        self.cell(0, 8, 'REVISA MI CASA - INFORME TÉCNICO PRELIMINAR', new_x="LMARGIN", new_y="NEXT", align='L')
-        self.set_font('Helvetica', '', 10)
-        self.set_text_color(37, 99, 235)
-        self.cell(0, 6, 'Evaluación de Patologías según Normativa Chilena (OGUC / LGUC / SEC)', new_x="LMARGIN", new_y="NEXT", align='L')
-        self.set_draw_color(37, 99, 235)
-        self.set_line_width(0.8)
-        self.line(10, self.get_y() + 2, 200, self.get_y() + 2)
-        self.ln(6)
+def limpiar_texto(texto: str) -> str:
+    """Elimina o reemplaza caracteres no soportados por las fuentes estándar de FPDF"""
+    if not texto:
+        return ""
+    
+    # Mapeo manual de caracteres comunes en español
+    reemplazos = {
+        'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u',
+        'Á': 'A', 'É': 'E', 'Í': 'I', 'Ó': 'O', 'Ú': 'U',
+        'ñ': 'n', 'Ñ': 'N', '°': ' deg ', '“': '"', '”': '"',
+        '’': "'", '–': '-', '—': '-', '¿': '', '¡': ''
+    }
+    for orig, rempl in reemplazos.items():
+        texto = texto.replace(orig, rempl)
+    
+    # Asegurar que solo contenga caracteres latin-1 legibles
+    return texto.encode('latin-1', 'ignore').decode('latin-1')
 
-    def footer(self):
-        self.set_y(-15)
-        self.set_font('Helvetica', 'I', 8)
-        self.set_text_color(100, 116, 139)
-        self.cell(0, 10, 'Informe automatizado preliminar por Revisa Mi Casa. Basado en OGUC, LGUC y normativas chilenas.', align='C')
-
-def generar_pdf_bytes(datos: dict) -> bytes:
-    pdf = PDFReport()
+def crear_pdf_binario(datos: dict) -> bytes:
+    """Genera el buffer de bytes binarios del PDF"""
+    pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    # Cuadro Resumen
-    pdf.set_fill_color(248, 250, 252)
-    pdf.set_draw_color(203, 213, 225)
-    pdf.rect(10, pdf.get_y(), 190, 38, style='DF')
-    
-    start_y = pdf.get_y() + 3
-    pdf.set_xy(12, start_y)
-    
-    pdf.set_font('Helvetica', 'B', 10)
+    # Encabezado principal
+    pdf.set_font('Helvetica', 'B', 14)
     pdf.set_text_color(15, 23, 42)
+    pdf.cell(0, 8, 'REVISA MI CASA - INFORME TECNICO PRELIMINAR', new_x="LMARGIN", new_y="NEXT")
     
+    pdf.set_font('Helvetica', '', 10)
+    pdf.set_text_color(37, 99, 235)
+    pdf.cell(0, 6, 'Evaluacion de Patologias segun Normativa Chilena (OGUC / LGUC / SEC)', new_x="LMARGIN", new_y="NEXT")
+    
+    pdf.set_draw_color(37, 99, 235)
+    pdf.set_line_width(0.8)
+    pdf.line(10, pdf.get_y() + 2, 200, pdf.get_y() + 2)
+    pdf.ln(8)
+
+    # Resumen Ejecutivo
     fields = [
-        ("Diagnóstico:", str(datos.get("titulo_diagnostico", "N/A"))),
-        ("Categoría:", str(datos.get("categoria", "N/A"))),
-        ("Nivel de Gravedad:", str(datos.get("nivel_gravedad", "N/A"))),
-        ("Normativa Asociada:", str(datos.get("normativa_chilena_asociada", "N/A")))
+        ("Diagnostico:", datos.get("titulo_diagnostico", "N/A")),
+        ("Categoria:", datos.get("categoria", "N/A")),
+        ("Nivel de Gravedad:", datos.get("nivel_gravedad", "N/A")),
+        ("Normativa Asociada:", datos.get("normativa_chilena_asociada", "N/A"))
     ]
     
     for label, val in fields:
         pdf.set_font('Helvetica', 'B', 9)
-        pdf.cell(40, 7, label, new_x="RIGHT", new_y="TOP")
+        pdf.set_text_color(15, 23, 42)
+        pdf.cell(40, 6, label, new_x="RIGHT", new_y="TOP")
+        
         pdf.set_font('Helvetica', '', 9)
-        # Limpiar texto para prevenir encoding errors en FPDF
-        val_clean = val.encode('latin-1', 'replace').decode('latin-1')
-        pdf.multi_cell(145, 7, val_clean, new_x="LMARGIN", new_y="NEXT")
-        pdf.set_x(12)
+        pdf.set_text_color(51, 65, 85)
+        pdf.multi_cell(0, 6, limpiar_texto(str(val)), new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(1)
 
-    pdf.set_y(start_y + 38)
-    pdf.ln(5)
+    pdf.ln(4)
 
-    # Detalle Técnico
+    # Secciones Detalladas
     sections = [
-        ("Descripción del Problema Detectado:", datos.get("descripcion_problema", "")),
-        ("Posible Causa Técnica:", datos.get("posible_causa", "")),
+        ("Descripcion del Problema Detectado:", datos.get("descripcion_problema", "")),
+        ("Posible Causa Tecnica:", datos.get("posible_causa", "")),
     ]
 
     for title, content in sections:
         pdf.set_font('Helvetica', 'B', 10)
         pdf.set_text_color(15, 23, 42)
         pdf.cell(0, 6, title, new_x="LMARGIN", new_y="NEXT")
+        
         pdf.set_font('Helvetica', '', 9)
         pdf.set_text_color(51, 65, 85)
-        content_clean = str(content).encode('latin-1', 'replace').decode('latin-1')
-        pdf.multi_cell(0, 5, content_clean)
+        pdf.multi_cell(0, 5, limpiar_texto(str(content)))
         pdf.ln(3)
 
     if datos.get("requiere_inspector_tecnico"):
         pdf.set_font('Helvetica', 'B', 10)
         pdf.set_text_color(220, 38, 38)
-        pdf.cell(0, 6, "RECOMENDACIÓN DE INSPECCIÓN PRESENCIAL:", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 6, "RECOMENDACION DE INSPECCION PRESENCIAL:", new_x="LMARGIN", new_y="NEXT")
+        
         pdf.set_font('Helvetica', '', 9)
         pdf.set_text_color(51, 65, 85)
-        motivo = str(datos.get("motivo_inspeccion", "")).encode('latin-1', 'replace').decode('latin-1')
-        pdf.multi_cell(0, 5, motivo)
+        pdf.multi_cell(0, 5, limpiar_texto(str(datos.get("motivo_inspeccion", ""))))
         pdf.ln(3)
 
     pasos = datos.get("pasos_reparacion", [])
     if pasos and datos.get("reparable_bricolaje"):
         pdf.set_font('Helvetica', 'B', 10)
         pdf.set_text_color(15, 23, 42)
-        pdf.cell(0, 6, "Pasos Sugeridos de Reparación Menor:", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 6, "Pasos Sugeridos de Reparacion Menor:", new_x="LMARGIN", new_y="NEXT")
+        
         pdf.set_font('Helvetica', '', 9)
         pdf.set_text_color(51, 65, 85)
         for paso in pasos:
-            paso_clean = str(paso).encode('latin-1', 'replace').decode('latin-1')
-            pdf.multi_cell(0, 5, f"- {paso_clean}")
+            pdf.multi_cell(0, 5, f"- {limpiar_texto(str(paso))}")
 
+    # Retorna los bytes directamente
     return bytes(pdf.output())
 
 
@@ -169,7 +158,7 @@ async def diagnosticar_dano(foto: UploadFile = File(...)):
     if not client:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
     if not foto.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Debe ser una imagen válida.")
+        raise HTTPException(status_code=400, detail="Debe cargar una imagen valida.")
 
     try:
         contents = await foto.read()
@@ -182,7 +171,7 @@ async def diagnosticar_dano(foto: UploadFile = File(...)):
         )
         return {"exito": True, "evaluacion": json.loads(response.text)}
     except Exception as e:
-        return {"exito": False, "error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/diagnostico/pdf")
@@ -190,24 +179,32 @@ async def generar_reporte_pdf(foto: UploadFile = File(...)):
     if not client:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
     if not foto.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Debe ser una imagen válida.")
+        raise HTTPException(status_code=400, detail="Debe cargar una imagen valida.")
 
     try:
+        # 1. Leer imagen
         contents = await foto.read()
         image = Image.open(io.BytesIO(contents))
         
+        # 2. Consultar Gemini 2.5 Flash
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[image, PROMPT_NORMATIVA_CHILE],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        datos = json.loads(response.text)
-        pdf_bytes = generar_pdf_bytes(datos)
+        datos_json = json.loads(response.text)
+        
+        # 3. Generar PDF binario en memoria
+        pdf_bytes = crear_pdf_binario(datos_json)
 
+        # 4. Devolver respuesta de bytes explícita con headers adecuados
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
-            headers={"Content-Disposition": 'attachment; filename="informe_revisamicasa.pdf"'}
+            headers={
+                "Content-Disposition": "attachment; filename=informe_revisamicasa.pdf",
+                "Access-Control-Expose-Headers": "Content-Disposition"
+            }
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en la generación: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en la generacion del PDF: {str(e)}")
