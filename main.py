@@ -16,9 +16,10 @@ from reportlab.lib import colors
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API para diagnóstico técnico de viviendas bajo normativa chilena",
-    version="5.0.0"
+    version="5.1.0"
 )
 
+# Configuración de CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -70,11 +71,13 @@ def generar_pdf_reportlab(datos: dict) -> bytes:
 
     story = []
 
+    # Cabecera
     story.append(Paragraph("REVISA MI CASA - INFORME TÉCNICO PRELIMINAR", title_style))
     story.append(Paragraph("Evaluación Normativa y Guía de Reparación (OGUC / LGUC / SEC / NCh)", subtitle_style))
     story.append(Spacer(1, 8))
     story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563eb'), spaceAfter=12))
 
+    # Cuadro de Resumen Técnico
     table_data = [
         [Paragraph("Diagnóstico:", label_style), Paragraph(str(datos.get("titulo_diagnostico", "N/A")), val_style)],
         [Paragraph("Categoría:", label_style), Paragraph(str(datos.get("categoria", "N/A")), val_style)],
@@ -94,6 +97,7 @@ def generar_pdf_reportlab(datos: dict) -> bytes:
     story.append(t)
     story.append(Spacer(1, 12))
 
+    # Detalle Técnico
     story.append(Paragraph("Descripción del Problema:", sec_title))
     story.append(Paragraph(str(datos.get("descripcion_problema", "")), val_style))
     story.append(Spacer(1, 8))
@@ -102,6 +106,7 @@ def generar_pdf_reportlab(datos: dict) -> bytes:
     story.append(Paragraph(str(datos.get("posible_causa", "")), val_style))
     story.append(Spacer(1, 8))
 
+    # Materiales
     materiales = datos.get("materiales_requeridos", [])
     if materiales:
         story.append(Paragraph("Materiales y Herramientas Sugeridas:", sec_title))
@@ -109,13 +114,15 @@ def generar_pdf_reportlab(datos: dict) -> bytes:
             story.append(Paragraph(f"• {mat}", val_style))
         story.append(Spacer(1, 8))
 
+    # Pasos
     pasos = datos.get("pasos_reparacion", [])
     if pasos:
-        story.append(Paragraph("Pasos de Reparación Paso a Paso:", sec_title))
+        story.append(Paragraph("Pasos de Reparación Recomendados:", sec_title))
         for idx, paso in enumerate(pasos, 1):
             story.append(Paragraph(f"{idx}. {paso}", val_style))
         story.append(Spacer(1, 8))
 
+    # Alerta ITO
     if datos.get("requiere_inspector_tecnico"):
         alert_style = ParagraphStyle('AlertTitle', parent=sec_title, textColor=colors.HexColor('#dc2626'))
         story.append(Paragraph("RECOMENDACIÓN DE INSPECCIÓN PRESENCIAL ITO:", alert_style))
@@ -137,20 +144,23 @@ def home():
     responses={
         200: {
             "content": {"application/pdf": {}},
-            "description": "Retorna el informe técnico preliminar en formato PDF."
+            "description": "Retorna el informe técnico preliminar compilado en PDF."
         }
     }
 )
 async def diagnostico_gratis(foto: UploadFile = File(...)):
     if not client:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada.")
+    
     if not foto.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Debe cargar una imagen válida.")
+        raise HTTPException(status_code=400, detail="El archivo subido debe ser una imagen válida.")
 
     try:
+        # 1. Procesar la imagen en memoria
         contents = await foto.read()
         image = Image.open(io.BytesIO(contents))
 
+        # 2. Obtener respuesta estructurada de Gemini
         res = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[image, PROMPT_NORMATIVA_CHILE],
@@ -158,15 +168,19 @@ async def diagnostico_gratis(foto: UploadFile = File(...)):
         )
         datos = json.loads(res.text)
 
+        # 3. Construir el binario PDF con ReportLab
         pdf_bytes = generar_pdf_reportlab(datos)
 
+        # 4. Retornar la respuesta como STREAM BINARIO PDF
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
             headers={
+                "Content-Type": "application/pdf",
                 "Content-Disposition": "attachment; filename=Informe_RevisaMiCasa.pdf",
                 "Access-Control-Expose-Headers": "Content-Disposition"
             }
         )
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en la generación del PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al procesar la solicitud: {str(e)}")
