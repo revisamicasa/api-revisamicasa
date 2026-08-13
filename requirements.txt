@@ -3,6 +3,5 @@ uvicorn==0.28.0
 python-multipart==0.0.9
 google-genai==0.1.1
 pillow==10.2.0
-pillow-heif==0.16.0
 pydantic==2.6.4
 reportlab==4.1.0
