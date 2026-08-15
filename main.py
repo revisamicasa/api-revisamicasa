@@ -28,7 +28,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Captura de la API Key desde cualquier variable de entorno posible
 GEMINI_KEY = (
     os.environ.get("GEMINI_API_KEY") or 
     os.environ.get("GOOGLE_API_KEY") or 
@@ -60,7 +59,6 @@ Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estruc
 """
 
 def limpiar_respuesta_json(texto: str) -> dict:
-    """Limpia la respuesta de Gemini eliminando bloques markdown de código."""
     texto_limpio = re.sub(r'```(?:json)?\s*([\s\S]*?)\s*```', r'\1', texto).strip()
     try:
         return json.loads(texto_limpio)
@@ -151,11 +149,9 @@ def generar_pdf_reportlab(datos: dict) -> bytes:
     buffer.seek(0)
     return buffer.getvalue()
 
-
 @app.get("/")
 def home():
     return {"status": "online", "servicio": "API Revisa Mi Casa"}
-
 
 @app.post("/diagnostico-gratis")
 async def diagnostico_gratis(foto: UploadFile = File(...)):
@@ -169,7 +165,6 @@ async def diagnostico_gratis(foto: UploadFile = File(...)):
         if image.mode in ("RGBA", "P"):
             image = image.convert("RGB")
 
-        # Modelo actualizado
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         res = model.generate_content([PROMPT_NORMATIVA_CHILE, image])
         
