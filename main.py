@@ -5,7 +5,7 @@ import re
 import traceback
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 from PIL import Image
 import google.generativeai as genai
 
@@ -17,7 +17,7 @@ from reportlab.lib import colors
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API para diagnóstico técnico de viviendas bajo normativa chilena",
-    version="13.1.0"
+    version="13.3.0"
 )
 
 app.add_middleware(
@@ -28,7 +28,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Captura de la API Key desde las variables de entorno
 GEMINI_KEY = (
     os.environ.get("GEMINI_API_KEY") or 
     os.environ.get("GOOGLE_API_KEY") or 
@@ -60,7 +59,6 @@ Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estruc
 """
 
 def limpiar_respuesta_json(texto: str) -> dict:
-    """Limpia el formato markdown si el modelo devuelve la respuesta envuelta en ```json."""
     texto_limpio = re.sub(r'```(?:json)?\s*([\s\S]*?)\s*```', r'\1', texto).strip()
     try:
         return json.loads(texto_limpio)
@@ -153,12 +151,12 @@ def generar_pdf_reportlab(datos: dict) -> bytes:
 
 @app.get("/")
 def home():
-    return {"status": "online", "servicio": "API Revisa Mi Casa"}
+    return {"status": "online", "servicio": "API Revisa Mi Casa", "gemini_configured": bool(GEMINI_KEY)}
 
 @app.post("/diagnostico-gratis")
 async def diagnostico_gratis(foto: UploadFile = File(...)):
     if not GEMINI_KEY:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY no configurada en el servidor.")
+        return JSONResponse(status_code=500, content={"error": "GEMINI_API_KEY no configurada en las variables de entorno de Render."})
 
     try:
         contents = await foto.read()
@@ -167,10 +165,24 @@ async def diagnostico_gratis(foto: UploadFile = File(...)):
         if image.mode in ("RGBA", "P"):
             image = image.convert("RGB")
 
-        # Configuración del modelo con fallback seguro de nombre
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        res = model.generate_content([PROMPT_NORMATIVA_CHILE, image])
-        
+        # Se intenta con los nombres de modelos actualizados
+        modelos_disponibles = ['gemini-1.5-flash-8b', 'gemini-1.5-pro', 'gemini-2.0-flash', 'gemini-2.5-flash']
+        res = None
+        ultimo_error = None
+
+        for nombre_modelo in modelos_disponibles:
+            try:
+                model = genai.GenerativeModel(nombre_modelo)
+                res = model.generate_content([PROMPT_NORMATIVA_CHILE, image])
+                if res and res.text:
+                    break
+            except Exception as err:
+                ultimo_error = err
+                continue
+
+        if not res or not res.text:
+            raise HTTPException(status_code=500, detail=f"No se pudo obtener respuesta de ningún modelo de Gemini. Último error: {str(ultimo_error)}")
+
         datos = limpiar_respuesta_json(res.text)
         pdf_bytes = generar_pdf_reportlab(datos)
 
@@ -184,7 +196,8 @@ async def diagnostico_gratis(foto: UploadFile = File(...)):
         )
 
     except Exception as e:
-        print("--- ERROR DETECTADO EN DIAGNOSTICO ---")
+        err_msg = str(e)
+        print("--- ERROR DETECTADO ---")
         traceback.print_exc()
-        print("--------------------------------------")
-        raise HTTPException(status_code=500, detail=f"Error al procesar la solicitud: {str(e)}")
+        print("-----------------------")
+        return JSONResponse(status_code=500, content={"error": err_msg, "trace": traceback.format_exc()})
