@@ -165,8 +165,8 @@ async def diagnostico_gratis(foto: UploadFile = File(...)):
         if image.mode in ("RGBA", "P"):
             image = image.convert("RGB")
 
-        # Se intenta con los nombres de modelos actualizados
-        modelos_disponibles = ['gemini-1.5-flash-8b', 'gemini-1.5-pro', 'gemini-2.0-flash', 'gemini-2.5-flash']
+        # Nombres de modelos actualizados con orden de prioridad
+        modelos_disponibles = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
         res = None
         ultimo_error = None
 
@@ -191,13 +191,13 @@ async def diagnostico_gratis(foto: UploadFile = File(...)):
             media_type="application/pdf",
             headers={
                 "Content-Disposition": "attachment; filename=Informe_Diagnostico.pdf",
-                "Content-Type": "application/pdf"
+                "Access-Control-Expose-Headers": "Content-Disposition"
             }
         )
 
     except Exception as e:
         err_msg = str(e)
-        print("--- ERROR DETECTADO ---")
+        print("--- ERROR DETECTADO EN DIAGNOSTICO ---")
         traceback.print_exc()
-        print("-----------------------")
+        print("--------------------------------------")
         return JSONResponse(status_code=500, content={"error": err_msg, "trace": traceback.format_exc()})
