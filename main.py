@@ -2,6 +2,7 @@ import os
 import io
 import json
 import re
+import traceback
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -16,7 +17,7 @@ from reportlab.lib import colors
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API para diagnóstico técnico de viviendas bajo normativa chilena",
-    version="11.0.0"
+    version="13.0.0"
 )
 
 app.add_middleware(
@@ -41,7 +42,7 @@ PROMPT_NORMATIVA_CHILE = """
 Actúa como un Inspector Técnico de Obras (ITO) y Perito Judicial de Edificación en Chile para 'Revisa Mi Casa'.
 Analiza la fotografía adjunta que muestra una falla, daño o patología en una edificación ubicada en Chile.
 
-Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estructura exactas:
+Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estructura exacta:
 {
     "titulo_diagnostico": "Nombre técnico de la falla",
     "categoria": "Pintura / Humedad / Estructura / Electricidad / Gasitería / Ventanales / Terminaciones",
@@ -168,8 +169,8 @@ async def diagnostico_gratis(foto: UploadFile = File(...)):
         if image.mode in ("RGBA", "P"):
             image = image.convert("RGB")
 
-        # Modelo estándar multimodal
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # Modelo actualizado
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
         res = model.generate_content([PROMPT_NORMATIVA_CHILE, image])
         
         datos = limpiar_respuesta_json(res.text)
@@ -185,4 +186,7 @@ async def diagnostico_gratis(foto: UploadFile = File(...)):
         )
 
     except Exception as e:
+        print("--- ERROR DETECTADO EN DIAGNOSTICO ---")
+        traceback.print_exc()
+        print("--------------------------------------")
         raise HTTPException(status_code=500, detail=f"Error al procesar la solicitud: {str(e)}")
