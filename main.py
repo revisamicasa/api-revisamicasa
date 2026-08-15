@@ -1,23 +1,23 @@
-import os
 import io
 import json
+import os
 import re
 import traceback
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, JSONResponse
-from PIL import Image
-import google.generativeai as genai
 
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
+import google.generativeai as genai
+from PIL import Image
 from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API para diagnóstico técnico de viviendas bajo normativa chilena",
-    version="13.3.0"
+    version="13.4.0",
 )
 
 app.add_middleware(
@@ -29,13 +29,13 @@ app.add_middleware(
 )
 
 GEMINI_KEY = (
-    os.environ.get("GEMINI_API_KEY") or 
-    os.environ.get("GOOGLE_API_KEY") or 
-    os.environ.get("API_KEY")
+    os.environ.get("GEMINI_API_KEY")
+    or os.environ.get("GOOGLE_API_KEY")
+    or os.environ.get("API_KEY")
 )
 
 if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY.strip())
+  genai.configure(api_key=GEMINI_KEY.strip())
 
 PROMPT_NORMATIVA_CHILE = """
 Actúa como un Inspector Técnico de Obras (ITO) y Perito Judicial de Edificación en Chile para 'Revisa Mi Casa'.
@@ -58,146 +58,276 @@ Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estruc
 }
 """
 
+
 def limpiar_respuesta_json(texto: str) -> dict:
-    texto_limpio = re.sub(r'```(?:json)?\s*([\s\S]*?)\s*```', r'\1', texto).strip()
-    try:
-        return json.loads(texto_limpio)
-    except Exception:
-        return {
-            "titulo_diagnostico": "Inspección Técnica Preliminar",
-            "categoria": "General",
-            "nivel_gravedad": "Por determinar",
-            "descripcion_problema": texto,
-            "posible_causa": "Se requiere inspección presencial en terreno.",
-            "normativa_chilena_asociada": "OGUC / NCh",
-            "estimacion_costo_reparacion": "A evaluar",
-            "materiales_requeridos": ["Evaluación técnica especializada"],
-            "pasos_reparacion": ["Consultar con un inspector de Revisa Mi Casa"],
-            "requiere_inspector_tecnico": True,
-            "motivo_inspeccion": "Verificación directa en obra."
-        }
+  texto_limpio = re.sub(r"```(?:json)?\s*([\s\S]*?)\s*```", r"\1", texto).strip()
+  try:
+    return json.loads(texto_limpio)
+  except Exception:
+    return {
+        "titulo_diagnostico": "Inspección Técnica Preliminar",
+        "categoria": "General",
+        "nivel_gravedad": "Por determinar",
+        "descripcion_problema": texto,
+        "posible_causa": "Se requiere inspección presencial en terreno.",
+        "normativa_chilena_asociada": "OGUC / NCh",
+        "estimacion_costo_reparacion": "A evaluar",
+        "materiales_requeridos": ["Evaluación técnica especializada"],
+        "pasos_reparacion": ["Consultar con un inspector de Revisa Mi Casa"],
+        "requiere_inspector_tecnico": True,
+        "motivo_inspeccion": "Verificación directa en obra.",
+    }
+
 
 def generar_pdf_reportlab(datos: dict) -> bytes:
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=letter,
-        rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36
+  buffer = io.BytesIO()
+  doc = SimpleDocTemplate(
+      buffer,
+      pagesize=letter,
+      rightMargin=36,
+      leftMargin=36,
+      topMargin=36,
+      bottomMargin=36,
+  )
+
+  styles = getSampleStyleSheet()
+  title_style = ParagraphStyle(
+      "Title",
+      parent=styles["Heading1"],
+      fontSize=16,
+      leading=20,
+      textColor=colors.HexColor("#0f172a"),
+      fontName="Helvetica-Bold",
+  )
+  subtitle_style = ParagraphStyle(
+      "SubTitle",
+      parent=styles["Normal"],
+      fontSize=10,
+      leading=14,
+      textColor=colors.HexColor("#2563eb"),
+      fontName="Helvetica-Bold",
+  )
+  label_style = ParagraphStyle(
+      "Label",
+      parent=styles["Normal"],
+      fontSize=9,
+      leading=12,
+      textColor=colors.HexColor("#0f172a"),
+      fontName="Helvetica-Bold",
+  )
+  val_style = ParagraphStyle(
+      "Val",
+      parent=styles["Normal"],
+      fontSize=9,
+      leading=12,
+      textColor=colors.HexColor("#334155"),
+      fontName="Helvetica",
+  )
+  sec_title = ParagraphStyle(
+      "SecTitle",
+      parent=styles["Heading2"],
+      fontSize=11,
+      leading=15,
+      textColor=colors.HexColor("#0f172a"),
+      fontName="Helvetica-Bold",
+      spaceAfter=4,
+  )
+
+  story = [
+      Paragraph("REVISA MI CASA - INFORME TÉCNICO PRELIMINAR", title_style),
+      Paragraph(
+          "Evaluación Normativa y Guía de Reparación (OGUC / LGUC / SEC / NCh)",
+          subtitle_style,
+      ),
+      Spacer(1, 8),
+      HRFlowable(
+          width="100%",
+          thickness=1.5,
+          color=colors.HexColor("#2563eb"),
+          spaceAfter=12,
+      ),
+  ]
+
+  table_data = [
+      [
+          Paragraph("Diagnóstico:", label_style),
+          Paragraph(str(datos.get("titulo_diagnostico", "N/A")), val_style),
+      ],
+      [
+          Paragraph("Categoría:", label_style),
+          Paragraph(str(datos.get("categoria", "N/A")), val_style),
+      ],
+      [
+          Paragraph("Gravedad:", label_style),
+          Paragraph(str(datos.get("nivel_gravedad", "N/A")), val_style),
+      ],
+      [
+          Paragraph("Normativa:", label_style),
+          Paragraph(
+              str(datos.get("normativa_chilena_asociada", "N/A")), val_style
+          ),
+      ],
+      [
+          Paragraph("Costo Est. Reparación:", label_style),
+          Paragraph(
+              str(datos.get("estimacion_costo_reparacion", "N/A")), val_style
+          ),
+      ],
+  ]
+
+  t = Table(table_data, colWidths=[120, 420])
+  t.setStyle(
+      TableStyle([
+          ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+          ("VALIGN", (0, 0), (-1, -1), "TOP"),
+          ("PADDING", (0, 0), (-1, -1), 4),
+          ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+          ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
+      ])
+  )
+  story.append(t)
+  story.append(Spacer(1, 12))
+
+  story.append(Paragraph("Descripción del Problema:", sec_title))
+  story.append(
+      Paragraph(str(datos.get("descripcion_problema", "")), val_style)
+  )
+  story.append(Spacer(1, 8))
+
+  story.append(Paragraph("Posible Causa Técnica:", sec_title))
+  story.append(Paragraph(str(datos.get("posible_causa", "")), val_style))
+  story.append(Spacer(1, 8))
+
+  materiales = datos.get("materiales_requeridos", [])
+  if isinstance(materiales, list) and materiales:
+    story.append(Paragraph("Materiales y Herramientas Sugeridas:", sec_title))
+    for mat in materiales:
+      story.append(Paragraph(f"• {mat}", val_style))
+    story.append(Spacer(1, 8))
+
+  pasos = datos.get("pasos_reparacion", [])
+  if isinstance(pasos, list) and pasos:
+    story.append(Paragraph("Pasos de Reparación Recomendados:", sec_title))
+    for idx, paso in enumerate(pasos, 1):
+      story.append(Paragraph(f"{idx}. {paso}", val_style))
+    story.append(Spacer(1, 8))
+
+  if datos.get("requiere_inspector_tecnico"):
+    alert_style = ParagraphStyle(
+        "AlertTitle", parent=sec_title, textColor=colors.HexColor("#dc2626")
+    )
+    story.append(
+        Paragraph("RECOMENDACIÓN DE INSPECCIÓN PRESENCIAL ITO:", alert_style)
+    )
+    story.append(
+        Paragraph(
+            str(
+                datos.get(
+                    "motivo_inspeccion",
+                    "Se recomienda la evaluación presencial de un profesional.",
+                )
+            ),
+            val_style,
+        )
     )
 
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle('Title', parent=styles['Heading1'], fontSize=16, leading=20, textColor=colors.HexColor('#0f172a'), fontName='Helvetica-Bold')
-    subtitle_style = ParagraphStyle('SubTitle', parent=styles['Normal'], fontSize=10, leading=14, textColor=colors.HexColor('#2563eb'), fontName='Helvetica-Bold')
-    label_style = ParagraphStyle('Label', parent=styles['Normal'], fontSize=9, leading=12, textColor=colors.HexColor('#0f172a'), fontName='Helvetica-Bold')
-    val_style = ParagraphStyle('Val', parent=styles['Normal'], fontSize=9, leading=12, textColor=colors.HexColor('#334155'), fontName='Helvetica')
-    sec_title = ParagraphStyle('SecTitle', parent=styles['Heading2'], fontSize=11, leading=15, textColor=colors.HexColor('#0f172a'), fontName='Helvetica-Bold', spaceAfter=4)
+  doc.build(story)
+  buffer.seek(0)
+  return buffer.getvalue()
 
-    story = [
-        Paragraph("REVISA MI CASA - INFORME TÉCNICO PRELIMINAR", title_style),
-        Paragraph("Evaluación Normativa y Guía de Reparación (OGUC / LGUC / SEC / NCh)", subtitle_style),
-        Spacer(1, 8),
-        HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563eb'), spaceAfter=12)
-    ]
-
-    table_data = [
-        [Paragraph("Diagnóstico:", label_style), Paragraph(str(datos.get("titulo_diagnostico", "N/A")), val_style)],
-        [Paragraph("Categoría:", label_style), Paragraph(str(datos.get("categoria", "N/A")), val_style)],
-        [Paragraph("Gravedad:", label_style), Paragraph(str(datos.get("nivel_gravedad", "N/A")), val_style)],
-        [Paragraph("Normativa:", label_style), Paragraph(str(datos.get("normativa_chilena_asociada", "N/A")), val_style)],
-        [Paragraph("Costo Est. Reparación:", label_style), Paragraph(str(datos.get("estimacion_costo_reparacion", "N/A")), val_style)]
-    ]
-
-    t = Table(table_data, colWidths=[120, 420])
-    t.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#f8fafc')),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('PADDING', (0, 0), (-1, -1), 4),
-        ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e1')),
-        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#e2e8f0')),
-    ]))
-    story.append(t)
-    story.append(Spacer(1, 12))
-
-    story.append(Paragraph("Descripción del Problema:", sec_title))
-    story.append(Paragraph(str(datos.get("descripcion_problema", "")), val_style))
-    story.append(Spacer(1, 8))
-
-    story.append(Paragraph("Posible Causa Técnica:", sec_title))
-    story.append(Paragraph(str(datos.get("posible_causa", "")), val_style))
-    story.append(Spacer(1, 8))
-
-    materiales = datos.get("materiales_requeridos", [])
-    if isinstance(materiales, list) and materiales:
-        story.append(Paragraph("Materiales y Herramientas Sugeridas:", sec_title))
-        for mat in materiales:
-            story.append(Paragraph(f"• {mat}", val_style))
-        story.append(Spacer(1, 8))
-
-    pasos = datos.get("pasos_reparacion", [])
-    if isinstance(pasos, list) and pasos:
-        story.append(Paragraph("Pasos de Reparación Recomendados:", sec_title))
-        for idx, paso in enumerate(pasos, 1):
-            story.append(Paragraph(f"{idx}. {paso}", val_style))
-        story.append(Spacer(1, 8))
-
-    if datos.get("requiere_inspector_tecnico"):
-        alert_style = ParagraphStyle('AlertTitle', parent=sec_title, textColor=colors.HexColor('#dc2626'))
-        story.append(Paragraph("RECOMENDACIÓN DE INSPECCIÓN PRESENCIAL ITO:", alert_style))
-        story.append(Paragraph(str(datos.get("motivo_inspeccion", "Se recomienda la evaluación presencial de un profesional.")), val_style))
-
-    doc.build(story)
-    buffer.seek(0)
-    return buffer.getvalue()
 
 @app.get("/")
 def home():
-    return {"status": "online", "servicio": "API Revisa Mi Casa", "gemini_configured": bool(GEMINI_KEY)}
+  return {
+      "status": "online",
+      "servicio": "API Revisa Mi Casa",
+      "gemini_configured": bool(GEMINI_KEY),
+  }
+
 
 @app.post("/diagnostico-gratis")
 async def diagnostico_gratis(foto: UploadFile = File(...)):
-    if not GEMINI_KEY:
-        return JSONResponse(status_code=500, content={"error": "GEMINI_API_KEY no configurada en las variables de entorno de Render."})
+  if not GEMINI_KEY:
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": (
+                "GEMINI_API_KEY no configurada en las variables de entorno de"
+                " Render."
+            )
+        },
+    )
 
+  try:
+    contents = await foto.read()
+    image = Image.open(io.BytesIO(contents))
+
+    if image.mode in ("RGBA", "P"):
+      image = image.convert("RGB")
+
+    # 1. Obtener la lista dinámica de modelos disponibles para la cuenta
+    modelos_disponibles = []
     try:
-        contents = await foto.read()
-        image = Image.open(io.BytesIO(contents))
-        
-        if image.mode in ("RGBA", "P"):
-            image = image.convert("RGB")
-
-        # Nombres de modelos actualizados con orden de prioridad
-        modelos_disponibles = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
-        res = None
-        ultimo_error = None
-
-        for nombre_modelo in modelos_disponibles:
-            try:
-                model = genai.GenerativeModel(nombre_modelo)
-                res = model.generate_content([PROMPT_NORMATIVA_CHILE, image])
-                if res and res.text:
-                    break
-            except Exception as err:
-                ultimo_error = err
-                continue
-
-        if not res or not res.text:
-            raise HTTPException(status_code=500, detail=f"No se pudo obtener respuesta de ningún modelo de Gemini. Último error: {str(ultimo_error)}")
-
-        datos = limpiar_respuesta_json(res.text)
-        pdf_bytes = generar_pdf_reportlab(datos)
-
-        return Response(
-            content=pdf_bytes,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": "attachment; filename=Informe_Diagnostico.pdf",
-                "Access-Control-Expose-Headers": "Content-Disposition"
-            }
-        )
-
+      for m in genai.list_models():
+        if "generateContent" in m.supported_generation_methods:
+          nombre = m.name.replace("models/", "")
+          modelos_disponibles.append(nombre)
     except Exception as e:
-        err_msg = str(e)
-        print("--- ERROR DETECTADO EN DIAGNOSTICO ---")
-        traceback.print_exc()
-        print("--------------------------------------")
-        return JSONResponse(status_code=500, content={"error": err_msg, "trace": traceback.format_exc()})
+      print(f"Error consultando list_models: {e}")
+
+    # Fallbacks de seguridad si list_models falla o viene vacío
+    modelos_fallback = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+    ]
+
+    # Fusionar evitando duplicados conservando orden de preferencia
+    modelos_a_probar = list(dict.fromkeys(modelos_disponibles + modelos_fallback))
+
+    res = None
+    ultimo_error = None
+
+    for nombre_modelo in modelos_a_probar:
+      try:
+        model = genai.GenerativeModel(nombre_modelo)
+        res = model.generate_content([PROMPT_NORMATIVA_CHILE, image])
+        if res and res.text:
+          break
+      except Exception as err:
+        ultimo_error = err
+        continue
+
+    if not res or not res.text:
+      raise HTTPException(
+          status_code=500,
+          detail=(
+              "No se pudo obtener respuesta de ningún modelo de Gemini. Último"
+              f" error: {str(ultimo_error)}"
+          ),
+      )
+
+    datos = limpiar_respuesta_json(res.text)
+    pdf_bytes = generar_pdf_reportlab(datos)
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                "attachment; filename=Informe_Diagnostico.pdf"
+            ),
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        },
+    )
+
+  except Exception as e:
+    err_msg = str(e)
+    print("--- ERROR DETECTADO EN DIAGNOSTICO ---")
+    traceback.print_exc()
+    print("--------------------------------------")
+    return JSONResponse(
+        status_code=500,
+        content={"error": err_msg, "trace": traceback.format_exc()},
+    )
