@@ -17,7 +17,7 @@ from reportlab.lib import colors
 app = FastAPI(
     title="Revisa Mi Casa API",
     description="API para diagnóstico técnico de viviendas bajo normativa chilena",
-    version="13.0.0"
+    version="13.1.0"
 )
 
 app.add_middleware(
@@ -28,6 +28,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Captura de la API Key desde las variables de entorno
 GEMINI_KEY = (
     os.environ.get("GEMINI_API_KEY") or 
     os.environ.get("GOOGLE_API_KEY") or 
@@ -59,6 +60,7 @@ Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estruc
 """
 
 def limpiar_respuesta_json(texto: str) -> dict:
+    """Limpia el formato markdown si el modelo devuelve la respuesta envuelta en ```json."""
     texto_limpio = re.sub(r'```(?:json)?\s*([\s\S]*?)\s*```', r'\1', texto).strip()
     try:
         return json.loads(texto_limpio)
@@ -165,7 +167,8 @@ async def diagnostico_gratis(foto: UploadFile = File(...)):
         if image.mode in ("RGBA", "P"):
             image = image.convert("RGB")
 
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        # Configuración del modelo con fallback seguro de nombre
+        model = genai.GenerativeModel('gemini-1.5-flash')
         res = model.generate_content([PROMPT_NORMATIVA_CHILE, image])
         
         datos = limpiar_respuesta_json(res.text)
