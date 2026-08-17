@@ -8,6 +8,7 @@ from typing import List, Optional
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.responses import Response, JSONResponse
 from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, UnidentifiedImageError, ImageOps
 from google import genai
 from google.genai import types, errors
@@ -28,7 +29,18 @@ logger = logging.getLogger("RevisaMiCasaAPI")
 app = FastAPI(
     title="Super API - Revisa Mi Casa",
     description="Servicio profesional de diagnóstico técnico e inspección de viviendas con IA.",
-    version="2.0.7"
+    version="2.0.8"
+)
+
+# ------------------------------------------------------------------------------
+# CONFIGURACIÓN DE CORS
+# ------------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Interceptor global para registrar excepciones en los logs de Render
@@ -48,6 +60,12 @@ async def log_exceptions_middleware(request: Request, call_next):
 
 # Límite de entrada por archivo (10 MB)
 MAX_IMAGE_SIZE = 10 * 1024 * 1024
+
+# --------------------------------------------------------------------------------
+# EL MODELO SE LEE DE LA VARIABLE DE ENTORNO GEMINI_MODEL EN RENDER.
+# Si no está configurada, utiliza 'gemini-2.5-flash' como valor por defecto válido.
+# --------------------------------------------------------------------------------
+MODELO_GEMINI = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 def optimizar_para_gemini(imagen_bytes: bytes, max_dim: int = 600) -> bytes:
@@ -185,7 +203,7 @@ def generar_pdf_informe(texto_diagnostico: str, imagenes_bytes: List[bytes]) -> 
 
 def consultar_gemini_api(api_key: str, imagenes_optimizadas: List[bytes]) -> str:
     """Consulta la API usando el SDK oficial de Google GenAI."""
-    logger.debug("Conectando con la API de Gemini...")
+    logger.debug(f"Conectando con la API de Gemini (modelo: {MODELO_GEMINI})...")
     client = genai.Client(api_key=api_key)
 
     prompt = (
@@ -205,9 +223,9 @@ def consultar_gemini_api(api_key: str, imagenes_optimizadas: List[bytes]) -> str
     partes = [types.Part.from_bytes(data=img, mime_type='image/jpeg') for img in imagenes_optimizadas]
     partes.append(prompt)
 
-    logger.debug("Enviando petición de generación de contenido a gemini-2.0-flash...")
+    logger.debug(f"Enviando petición de generación de contenido a {MODELO_GEMINI}...")
     response = client.models.generate_content(
-        model='gemini-2.0-flash',
+        model=MODELO_GEMINI,
         contents=partes,
         config=config
     )
@@ -223,7 +241,7 @@ def consultar_gemini_api(api_key: str, imagenes_optimizadas: List[bytes]) -> str
 @app.get("/", summary="Estado del Servicio")
 def read_root():
     logger.info("Consulta al endpoint raíz '/' realizada.")
-    return Response(content="Super API Revisa Mi Casa v2.0.7 - Operativa", media_type="text/plain")
+    return Response(content=f"Super API Revisa Mi Casa v2.0.8 - Operativa (modelo: {MODELO_GEMINI})", media_type="text/plain")
 
 
 @app.post(
@@ -233,12 +251,12 @@ def read_root():
 )
 async def diagnostico_gratis(
     fotos: Optional[List[UploadFile]] = File(
-        default=None,
+        None,
         description="[ESTÁNDAR RECOMENDADO] Lista de hasta 2 imágenes asociadas a la inspección."
     ),
     foto: Optional[UploadFile] = File(
-        default=None,
-        description="[DEPRECADA / LEGADO] Imagen individual enviada por clientes anteriores."
+        None,
+        description="[DEPRECADA / LEGADO] Imagen individual enviada por clientes anteriores. Se consolidará a futuro en 'fotos'."
     )
 ):
     lista_fotos: List[UploadFile] = []
@@ -252,7 +270,7 @@ async def diagnostico_gratis(
     if not lista_fotos:
         logger.warning("Petición rechazada: No se incluyeron fotos.")
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail="Debe adjuntar al menos una imagen en el parámetro 'fotos' o 'foto'."
         )
 
@@ -296,7 +314,6 @@ async def diagnostico_gratis(
             logger.critical("VARIABLE DE ENTORNO NO ENCONTRADA: 'GEMINI_API_KEY' no está configurada.")
             raise HTTPException(status_code=500, detail="Error de configuración interna del servidor: Falta API Key.")
 
-        # Consulta a Gemini
         try:
             texto_diagnostico = await run_in_threadpool(
                 consultar_gemini_api, api_key, imagenes_optimizadas
@@ -315,7 +332,6 @@ async def diagnostico_gratis(
                 detail=f"Error al analizar la imagen mediante la IA: {str(ai_err)}"
             )
 
-        # Generación del PDF
         try:
             pdf_bytes = await run_in_threadpool(
                 generar_pdf_informe, texto_diagnostico, imagenes_optimizadas
@@ -340,10 +356,3 @@ async def diagnostico_gratis(
         imagenes_optimizadas.clear()
         gc.collect()
         logger.debug("Recursos en memoria liberados mediante garbage collector.")
-
-
-if __name__ == "__main__":
-    import uvicorn
-    # Render asigna el puerto dinámicamente en la variable PORT. Si no existe, usa 8000.
-    port_env = int(os.getenv("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port_env)
