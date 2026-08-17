@@ -1,333 +1,349 @@
 import io
-import json
 import os
+import gc
 import re
+import logging
 import traceback
-
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
-import google.generativeai as genai
-from PIL import Image
-from reportlab.lib import colors
+from typing import List, Optional
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request
+from fastapi.responses import Response, JSONResponse
+from fastapi.concurrency import run_in_threadpool
+from PIL import Image, UnidentifiedImageError, ImageOps
+from google import genai
+from google.genai import types, errors
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+
+# ------------------------------------------------------------------------------
+# CONFIGURACIÓN DE LOGS PARA RENDER (Nivel DEBUG)
+# ------------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] [%(name)s]: %(message)s"
+)
+logger = logging.getLogger("RevisaMiCasaAPI")
 
 app = FastAPI(
-    title="Revisa Mi Casa API",
-    description="API para diagnóstico técnico de viviendas bajo normativa chilena",
-    version="13.4.0",
+    title="Super API - Revisa Mi Casa",
+    description="Servicio profesional de diagnóstico técnico e inspección de viviendas con IA.",
+    version="2.0.7"
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-GEMINI_KEY = (
-    os.environ.get("GEMINI_API_KEY")
-    or os.environ.get("GOOGLE_API_KEY")
-    or os.environ.get("API_KEY")
-)
-
-if GEMINI_KEY:
-  genai.configure(api_key=GEMINI_KEY.strip())
-
-PROMPT_NORMATIVA_CHILE = """
-Actúa como un Inspector Técnico de Obras (ITO) y Perito Judicial de Edificación en Chile para 'Revisa Mi Casa'.
-Analiza la fotografía adjunta que muestra una falla, daño o patología en una edificación ubicada en Chile.
-
-Debes responder EXCLUSIVAMENTE en un objeto JSON válido con la siguiente estructura exacta:
-{
-    "titulo_diagnostico": "Nombre técnico de la falla",
-    "categoria": "Pintura / Humedad / Estructura / Electricidad / Gasitería / Ventanales / Terminaciones",
-    "nivel_gravedad": "Baja / Media / Alta / Crítica",
-    "descripcion_problema": "Explicación clara y técnica para el propietario",
-    "posible_causa": "Origen probable del problema",
-    "normativa_chilena_asociada": "Mención explícita de norma NCh, OGUC, SEC, MINVU o LGUC",
-    "reparable_bricolaje": true,
-    "materiales_requeridos": ["Material 1", "Herramienta 2"],
-    "pasos_reparacion": ["Paso 1", "Paso 2"],
-    "estimacion_costo_reparacion": "Ej: $20.000 - $45.000 CLP",
-    "requiere_inspector_tecnico": true,
-    "motivo_inspeccion": "Justificación de la inspección presencial"
-}
-"""
-
-
-def limpiar_respuesta_json(texto: str) -> dict:
-  texto_limpio = re.sub(r"```(?:json)?\s*([\s\S]*?)\s*```", r"\1", texto).strip()
-  try:
-    return json.loads(texto_limpio)
-  except Exception:
-    return {
-        "titulo_diagnostico": "Inspección Técnica Preliminar",
-        "categoria": "General",
-        "nivel_gravedad": "Por determinar",
-        "descripcion_problema": texto,
-        "posible_causa": "Se requiere inspección presencial en terreno.",
-        "normativa_chilena_asociada": "OGUC / NCh",
-        "estimacion_costo_reparacion": "A evaluar",
-        "materiales_requeridos": ["Evaluación técnica especializada"],
-        "pasos_reparacion": ["Consultar con un inspector de Revisa Mi Casa"],
-        "requiere_inspector_tecnico": True,
-        "motivo_inspeccion": "Verificación directa en obra.",
-    }
-
-
-def generar_pdf_reportlab(datos: dict) -> bytes:
-  buffer = io.BytesIO()
-  doc = SimpleDocTemplate(
-      buffer,
-      pagesize=letter,
-      rightMargin=36,
-      leftMargin=36,
-      topMargin=36,
-      bottomMargin=36,
-  )
-
-  styles = getSampleStyleSheet()
-  title_style = ParagraphStyle(
-      "Title",
-      parent=styles["Heading1"],
-      fontSize=16,
-      leading=20,
-      textColor=colors.HexColor("#0f172a"),
-      fontName="Helvetica-Bold",
-  )
-  subtitle_style = ParagraphStyle(
-      "SubTitle",
-      parent=styles["Normal"],
-      fontSize=10,
-      leading=14,
-      textColor=colors.HexColor("#2563eb"),
-      fontName="Helvetica-Bold",
-  )
-  label_style = ParagraphStyle(
-      "Label",
-      parent=styles["Normal"],
-      fontSize=9,
-      leading=12,
-      textColor=colors.HexColor("#0f172a"),
-      fontName="Helvetica-Bold",
-  )
-  val_style = ParagraphStyle(
-      "Val",
-      parent=styles["Normal"],
-      fontSize=9,
-      leading=12,
-      textColor=colors.HexColor("#334155"),
-      fontName="Helvetica",
-  )
-  sec_title = ParagraphStyle(
-      "SecTitle",
-      parent=styles["Heading2"],
-      fontSize=11,
-      leading=15,
-      textColor=colors.HexColor("#0f172a"),
-      fontName="Helvetica-Bold",
-      spaceAfter=4,
-  )
-
-  story = [
-      Paragraph("REVISA MI CASA - INFORME TÉCNICO PRELIMINAR", title_style),
-      Paragraph(
-          "Evaluación Normativa y Guía de Reparación (OGUC / LGUC / SEC / NCh)",
-          subtitle_style,
-      ),
-      Spacer(1, 8),
-      HRFlowable(
-          width="100%",
-          thickness=1.5,
-          color=colors.HexColor("#2563eb"),
-          spaceAfter=12,
-      ),
-  ]
-
-  table_data = [
-      [
-          Paragraph("Diagnóstico:", label_style),
-          Paragraph(str(datos.get("titulo_diagnostico", "N/A")), val_style),
-      ],
-      [
-          Paragraph("Categoría:", label_style),
-          Paragraph(str(datos.get("categoria", "N/A")), val_style),
-      ],
-      [
-          Paragraph("Gravedad:", label_style),
-          Paragraph(str(datos.get("nivel_gravedad", "N/A")), val_style),
-      ],
-      [
-          Paragraph("Normativa:", label_style),
-          Paragraph(
-              str(datos.get("normativa_chilena_asociada", "N/A")), val_style
-          ),
-      ],
-      [
-          Paragraph("Costo Est. Reparación:", label_style),
-          Paragraph(
-              str(datos.get("estimacion_costo_reparacion", "N/A")), val_style
-          ),
-      ],
-  ]
-
-  t = Table(table_data, colWidths=[120, 420])
-  t.setStyle(
-      TableStyle([
-          ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
-          ("VALIGN", (0, 0), (-1, -1), "TOP"),
-          ("PADDING", (0, 0), (-1, -1), 4),
-          ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
-          ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
-      ])
-  )
-  story.append(t)
-  story.append(Spacer(1, 12))
-
-  story.append(Paragraph("Descripción del Problema:", sec_title))
-  story.append(
-      Paragraph(str(datos.get("descripcion_problema", "")), val_style)
-  )
-  story.append(Spacer(1, 8))
-
-  story.append(Paragraph("Posible Causa Técnica:", sec_title))
-  story.append(Paragraph(str(datos.get("posible_causa", "")), val_style))
-  story.append(Spacer(1, 8))
-
-  materiales = datos.get("materiales_requeridos", [])
-  if isinstance(materiales, list) and materiales:
-    story.append(Paragraph("Materiales y Herramientas Sugeridas:", sec_title))
-    for mat in materiales:
-      story.append(Paragraph(f"• {mat}", val_style))
-    story.append(Spacer(1, 8))
-
-  pasos = datos.get("pasos_reparacion", [])
-  if isinstance(pasos, list) and pasos:
-    story.append(Paragraph("Pasos de Reparación Recomendados:", sec_title))
-    for idx, paso in enumerate(pasos, 1):
-      story.append(Paragraph(f"{idx}. {paso}", val_style))
-    story.append(Spacer(1, 8))
-
-  if datos.get("requiere_inspector_tecnico"):
-    alert_style = ParagraphStyle(
-        "AlertTitle", parent=sec_title, textColor=colors.HexColor("#dc2626")
-    )
-    story.append(
-        Paragraph("RECOMENDACIÓN DE INSPECCIÓN PRESENCIAL ITO:", alert_style)
-    )
-    story.append(
-        Paragraph(
-            str(
-                datos.get(
-                    "motivo_inspeccion",
-                    "Se recomienda la evaluación presencial de un profesional.",
-                )
-            ),
-            val_style,
-        )
-    )
-
-  doc.build(story)
-  buffer.seek(0)
-  return buffer.getvalue()
-
-
-@app.get("/")
-def home():
-  return {
-      "status": "online",
-      "servicio": "API Revisa Mi Casa",
-      "gemini_configured": bool(GEMINI_KEY),
-  }
-
-
-@app.post("/diagnostico-gratis")
-async def diagnostico_gratis(foto: UploadFile = File(...)):
-  if not GEMINI_KEY:
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": (
-                "GEMINI_API_KEY no configurada en las variables de entorno de"
-                " Render."
-            )
-        },
-    )
-
-  try:
-    contents = await foto.read()
-    image = Image.open(io.BytesIO(contents))
-
-    if image.mode in ("RGBA", "P"):
-      image = image.convert("RGB")
-
-    # 1. Obtener la lista dinámica de modelos disponibles para la cuenta
-    modelos_disponibles = []
+# Interceptor global para registrar excepciones en los logs de Render
+@app.middleware("http")
+async def log_exceptions_middleware(request: Request, call_next):
     try:
-      for m in genai.list_models():
-        if "generateContent" in m.supported_generation_methods:
-          nombre = m.name.replace("models/", "")
-          modelos_disponibles.append(nombre)
+        return await call_next(request)
+    except Exception as exc:
+        logger.error(f"--- EXCEPCIÓN NO CONTROLADA EN {request.url.path} ---")
+        logger.error(f"Detalle del error: {str(exc)}")
+        logger.error(traceback.format_exc())
+        logger.error("-----------------------------------------------------")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Error interno del servidor", "error_log": str(exc)}
+        )
+
+# Límite de entrada por archivo (10 MB)
+MAX_IMAGE_SIZE = 10 * 1024 * 1024
+
+
+def optimizar_para_gemini(imagen_bytes: bytes, max_dim: int = 600) -> bytes:
+    """Valida, corrige orientación EXIF, convierte espacios de color y comprime la imagen."""
+    try:
+        logger.debug("Iniciando procesamiento de imagen con Pillow...")
+        with Image.open(io.BytesIO(imagen_bytes)) as img:
+            logger.debug(f"Formato original: {img.format}, Modo: {img.mode}, Tamaño: {img.size}")
+
+            # Rotación automática según metadatos EXIF de la cámara/celular
+            img = ImageOps.exif_transpose(img)
+
+            if img.mode in ("RGBA", "P", "CMYK"):
+                logger.debug(f"Convirtiendo espacio de color de {img.mode} a RGB...")
+                img = img.convert("RGB")
+
+            img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+
+            buffer_salida = io.BytesIO()
+            img.save(buffer_salida, format="JPEG", quality=60, optimize=True)
+            res_bytes = buffer_salida.getvalue()
+            logger.debug(f"Imagen optimizada exitosamente. Tamaño final: {len(res_bytes)} bytes")
+            return res_bytes
+    except UnidentifiedImageError as uie:
+        logger.error(f"Error Pillow: Archivo no identificado como imagen válida. {str(uie)}")
+        raise ValueError("El archivo enviado no es una imagen válida o está dañado.")
     except Exception as e:
-      print(f"Error consultando list_models: {e}")
+        logger.error(f"Error inesperado al optimizar imagen: {str(e)}")
+        raise ValueError(f"Error al procesar la imagen: {str(e)}")
 
-    # Fallbacks de seguridad si list_models falla o viene vacío
-    modelos_fallback = [
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-    ]
 
-    # Fusionar evitando duplicados conservando orden de preferencia
-    modelos_a_probar = list(dict.fromkeys(modelos_disponibles + modelos_fallback))
+def sanitizar_texto_para_pdf(texto: str) -> str:
+    """Limpia caracteres especiales para evitar colapsos en ReportLab."""
+    if not texto:
+        return "Sin observaciones registradas."
 
-    res = None
-    ultimo_error = None
+    texto = re.sub(r'```(?:json)?', '', texto)
+    texto = texto.replace('```', '')
+    texto = texto.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    return texto.strip()
 
-    for nombre_modelo in modelos_a_probar:
-      try:
-        model = genai.GenerativeModel(nombre_modelo)
-        res = model.generate_content([PROMPT_NORMATIVA_CHILE, image])
-        if res and res.text:
-          break
-      except Exception as err:
-        ultimo_error = err
-        continue
 
-    if not res or not res.text:
-      raise HTTPException(
-          status_code=500,
-          detail=(
-              "No se pudo obtener respuesta de ningún modelo de Gemini. Último"
-              f" error: {str(ultimo_error)}"
-          ),
-      )
+def generar_pdf_informe(texto_diagnostico: str, imagenes_bytes: List[bytes]) -> bytes:
+    """Compila el informe PDF en memoria garantizando una fila uniforme."""
+    logger.debug("Iniciando generación de PDF con ReportLab...")
+    buffer = io.BytesIO()
+    try:
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=letter,
+            rightMargin=36,
+            leftMargin=36,
+            topMargin=36,
+            bottomMargin=36
+        )
 
-    datos = limpiar_respuesta_json(res.text)
-    pdf_bytes = generar_pdf_reportlab(datos)
+        story = []
+        styles = getSampleStyleSheet()
 
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": (
-                "attachment; filename=Informe_Diagnostico.pdf"
-            ),
-            "Access-Control-Expose-Headers": "Content-Disposition",
-        },
+        titulo_style = ParagraphStyle(
+            'TituloHeader',
+            parent=styles['Heading1'],
+            fontSize=18,
+            leading=22,
+            textColor=colors.HexColor("#0F2942"),
+            spaceAfter=4
+        )
+
+        subtitulo_style = ParagraphStyle(
+            'SubTituloHeader',
+            parent=styles['Normal'],
+            fontSize=10,
+            leading=12,
+            textColor=colors.HexColor("#5A6B7C"),
+            spaceAfter=15
+        )
+
+        cuerpo_style = ParagraphStyle(
+            'CuerpoDoc',
+            parent=styles['BodyText'],
+            fontSize=10,
+            leading=14,
+            textColor=colors.HexColor("#2C3E50"),
+            spaceAfter=8
+        )
+
+        story.append(Paragraph("<b>REVISA MI CASA</b>", titulo_style))
+        story.append(Paragraph("Informe Técnico de Inspección Preventiva | www.revisamicasa.cl", subtitulo_style))
+        story.append(Spacer(1, 10))
+
+        if imagenes_bytes:
+            elementos_img = []
+            for idx, img_bytes in enumerate(imagenes_bytes):
+                try:
+                    img_stream = io.BytesIO(img_bytes)
+                    elementos_img.append(RLImage(img_stream, width=220, height=165))
+                except Exception as img_err:
+                    logger.warning(f"Error al adjuntar foto #{idx+1} al PDF: {img_err}")
+
+            if elementos_img:
+                num_columnas = len(elementos_img)
+                tabla_fotos = Table([elementos_img], colWidths=[240] * num_columnas)
+                tabla_fotos.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+                ]))
+                story.append(tabla_fotos)
+                story.append(Spacer(1, 10))
+
+        story.append(Paragraph("<b>Evaluación y Recomendaciones del Inspector:</b>", styles['Heading2']))
+        story.append(Spacer(1, 6))
+
+        texto_limpio = sanitizar_texto_para_pdf(texto_diagnostico)
+        parrafos = texto_limpio.split('\n')
+
+        for p in parrafos:
+            linea = p.strip()
+            if linea:
+                linea = re.sub(r'^[*\-•]\s*', '', linea)
+                story.append(Paragraph(linea, cuerpo_style))
+
+        doc.build(story)
+        buffer.seek(0)
+        pdf_data = buffer.getvalue()
+        logger.debug(f"PDF generado correctamente. Tamaño: {len(pdf_data)} bytes")
+        return pdf_data
+    except Exception as pdf_e:
+        logger.error(f"Fallo crítico al ensamblar el PDF en ReportLab: {str(pdf_e)}")
+        logger.error(traceback.format_exc())
+        raise pdf_e
+    finally:
+        buffer.close()
+
+
+def consultar_gemini_api(api_key: str, imagenes_optimizadas: List[bytes]) -> str:
+    """Consulta la API usando el SDK oficial de Google GenAI."""
+    logger.debug("Conectando con la API de Gemini...")
+    client = genai.Client(api_key=api_key)
+
+    prompt = (
+        "Eres un inspector técnico de viviendas experto en edificación y normativa en Chile. "
+        "Analiza las imágenes adjuntas y redacta un diagnóstico técnico profesional, estructurado en:\n"
+        "1. Hallazgo / Falla Detectada\n"
+        "2. Causa Probable\n"
+        "3. Recomendación Técnica de Reparación\n\n"
+        "Sé preciso, conciso (máximo 3 párrafos en total) y profesional. NO utilices formato JSON ni bloques de código."
     )
 
-  except Exception as e:
-    err_msg = str(e)
-    print("--- ERROR DETECTADO EN DIAGNOSTICO ---")
-    traceback.print_exc()
-    print("--------------------------------------")
-    return JSONResponse(
-        status_code=500,
-        content={"error": err_msg, "trace": traceback.format_exc()},
+    config = types.GenerateContentConfig(
+        max_output_tokens=450,
+        temperature=0.2
     )
+
+    partes = [types.Part.from_bytes(data=img, mime_type='image/jpeg') for img in imagenes_optimizadas]
+    partes.append(prompt)
+
+    logger.debug("Enviando petición de generación de contenido a gemini-2.0-flash...")
+    response = client.models.generate_content(
+        model='gemini-2.0-flash',
+        contents=partes,
+        config=config
+    )
+
+    if response and response.text:
+        logger.debug("Respuesta recibida exitosamente desde Gemini.")
+        return response.text
+
+    logger.error("Gemini no devolvió texto en la respuesta.")
+    raise RuntimeError("La API de Gemini no devolvió texto en el diagnóstico.")
+
+
+@app.get("/", summary="Estado del Servicio")
+def read_root():
+    logger.info("Consulta al endpoint raíz '/' realizada.")
+    return Response(content="Super API Revisa Mi Casa v2.0.7 - Operativa", media_type="text/plain")
+
+
+@app.post(
+    "/diagnostico-gratis",
+    summary="Generar Diagnóstico en PDF",
+    description="Procesa hasta 2 imágenes enviadas por el usuario, consulta la IA y devuelve un documento PDF descargable."
+)
+async def diagnostico_gratis(
+    fotos: Optional[List[UploadFile]] = File(
+        default=None,
+        description="[ESTÁNDAR RECOMENDADO] Lista de hasta 2 imágenes asociadas a la inspección."
+    ),
+    foto: Optional[UploadFile] = File(
+        default=None,
+        description="[DEPRECADA / LEGADO] Imagen individual enviada por clientes anteriores."
+    )
+):
+    lista_fotos: List[UploadFile] = []
+    if fotos:
+        lista_fotos.extend(fotos)
+    if foto:
+        lista_fotos.append(foto)
+
+    logger.info(f"--- NUEVA PETICIÓN EN /diagnostico-gratis --- Archivos recibidos: {len(lista_fotos)}")
+
+    if not lista_fotos:
+        logger.warning("Petición rechazada: No se incluyeron fotos.")
+        raise HTTPException(
+            status_code=400, 
+            detail="Debe adjuntar al menos una imagen en el parámetro 'fotos' o 'foto'."
+        )
+
+    if len(lista_fotos) > 2:
+        logger.warning(f"Petición rechazada: {len(lista_fotos)} fotos enviadas (máximo permitido: 2).")
+        raise HTTPException(status_code=400, detail="El límite máximo es de 2 imágenes por consulta.")
+
+    imagenes_optimizadas = []
+
+    try:
+        for idx, f in enumerate(lista_fotos):
+            logger.info(f"Procesando archivo #{idx+1}: {f.filename} (ContentType: {f.content_type})")
+            imagen_bytes = await f.read()
+
+            if len(imagen_bytes) == 0:
+                logger.warning(f"Archivo {f.filename} está vacío (0 bytes). Omitiendo.")
+                continue
+
+            if len(imagen_bytes) > MAX_IMAGE_SIZE:
+                logger.error(f"Archivo {f.filename} excede el tamaño máximo: {len(imagen_bytes)} bytes.")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"La imagen '{f.filename}' supera el peso máximo permitido (10 MB)."
+                )
+
+            try:
+                img_opt = await run_in_threadpool(optimizar_para_gemini, imagen_bytes)
+                imagenes_optimizadas.append(img_opt)
+            except ValueError as ve:
+                logger.error(f"Error procesando imagen '{f.filename}': {str(ve)}")
+                raise HTTPException(status_code=400, detail=str(ve))
+            finally:
+                del imagen_bytes
+
+        if not imagenes_optimizadas:
+            logger.error("No se obtuvieron imágenes válidas tras la optimización.")
+            raise HTTPException(status_code=400, detail="No se enviaron imágenes válidas.")
+
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            logger.critical("VARIABLE DE ENTORNO NO ENCONTRADA: 'GEMINI_API_KEY' no está configurada.")
+            raise HTTPException(status_code=500, detail="Error de configuración interna del servidor: Falta API Key.")
+
+        # Consulta a Gemini
+        try:
+            texto_diagnostico = await run_in_threadpool(
+                consultar_gemini_api, api_key, imagenes_optimizadas
+            )
+        except errors.APIError as api_err:
+            logger.error(f"Error específico devuelto por la API de Gemini: {api_err}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Servicio de IA no disponible: {api_err.message}"
+            )
+        except Exception as ai_err:
+            logger.error(f"Fallo durante la invocación de IA: {str(ai_err)}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error al analizar la imagen mediante la IA: {str(ai_err)}"
+            )
+
+        # Generación del PDF
+        try:
+            pdf_bytes = await run_in_threadpool(
+                generar_pdf_informe, texto_diagnostico, imagenes_optimizadas
+            )
+        except Exception as pdf_err:
+            logger.error(f"Fallo durante la generación del PDF: {str(pdf_err)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error al generar el documento PDF: {str(pdf_err)}"
+            )
+
+        logger.info("=== PROCESO COMPLETADO EXITOSAMENTE: PDF Entregado ===")
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": "attachment; filename=Informe_Diagnostico_RevisaMiCasa.pdf"
+            }
+        )
+
+    finally:
+        imagenes_optimizadas.clear()
+        gc.collect()
+        logger.debug("Recursos en memoria liberados mediante garbage collector.")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    # Render asigna el puerto dinámicamente en la variable PORT. Si no existe, usa 8000.
+    port_env = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port_env)
